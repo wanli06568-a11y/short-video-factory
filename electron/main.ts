@@ -9,6 +9,11 @@ import i18next from 'i18next'
 import { changeAppLanguage, initI18n } from './i18n'
 import { i18nLanguages } from './i18n/common-options'
 import useCookieAllowCrossSite from './lib/cookie-allow-cross-site'
+import { flushAnalytics, registerAnalyticsWindow, startAnalytics } from './lib/analytics/service'
+import { initLogger, writeMainLog } from './logger'
+import { initUpdateChecker } from './updater'
+import { getMainWindowSize } from './lib/window-size'
+import { initializeMetadataService } from './metadata/runtime'
 
 // 用于引入 CommonJS 模块的方法
 // import { createRequire } from 'node:module'
@@ -35,23 +40,65 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = isDev ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
 let win: BrowserWindow | null
+let mainConsoleHooked = false
+
+function setupMainConsoleLogging() {
+  if (mainConsoleHooked) return
+
+  const rawConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+  }
+
+  console.log = (...args: unknown[]) => {
+    rawConsole.log(...args)
+    writeMainLog('log', ...args)
+  }
+  console.info = (...args: unknown[]) => {
+    rawConsole.info(...args)
+    writeMainLog('info', ...args)
+  }
+  console.warn = (...args: unknown[]) => {
+    rawConsole.warn(...args)
+    writeMainLog('warn', ...args)
+  }
+  console.error = (...args: unknown[]) => {
+    rawConsole.error(...args)
+    writeMainLog('error', ...args)
+  }
+  console.debug = (...args: unknown[]) => {
+    rawConsole.debug(...args)
+    writeMainLog('debug', ...args)
+  }
+  mainConsoleHooked = true
+}
 
 function createWindow() {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize
+  const windowSize = getMainWindowSize(screen.getPrimaryDisplay().workAreaSize)
+  const isMac = process.platform === 'darwin'
+
   win = new BrowserWindow({
     icon: path.join(process.env.VITE_PUBLIC, 'icon.png'),
-    width: Math.ceil(width * 0.8),
-    height: Math.ceil(height * 0.8),
-    minWidth: 800,
-    minHeight: 650,
+    ...windowSize,
     backgroundColor: '#F3F3F3',
     show: false,
-    frame: false,
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset',
+          trafficLightPosition: { x: 12, y: 12 },
+        }
+      : {
+          frame: false,
+        }),
     webPreferences: {
       webSecurity: false,
       preload: path.join(__dirname, 'preload.js'),
     },
   })
+  registerAnalyticsWindow(win.webContents.id)
 
   // 优化应用进入体验
   win.once('ready-to-show', () => {
@@ -180,10 +227,18 @@ app.on('activate', () => {
 // app.disableHardwareAcceleration();
 
 app.whenReady().then(() => {
+  initLogger()
+  setupMainConsoleLogging()
   initSqlite()
   initI18n()
   initIPC()
+  initializeMetadataService()
+  void startAnalytics()
   createWindow()
+
+  if (win) {
+    initUpdateChecker(win)
+  }
 
   i18next.on('languageChanged', () => {
     buildMenu()
@@ -195,4 +250,13 @@ app.whenReady().then(() => {
   app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors')
   // 允许本地网络请求
   app.commandLine.appendSwitch('disable-features', 'BlockInsecurePrivateNetworkRequests')
+})
+
+let analyticsQuitStarted = false
+app.on('before-quit', (event) => {
+  if (analyticsQuitStarted) return
+  event.preventDefault()
+  analyticsQuitStarted = true
+  const exitAfterTimeout = new Promise<void>((resolve) => setTimeout(resolve, 900))
+  void Promise.race([flushAnalytics(850), exitAfterTimeout]).finally(() => app.quit())
 })

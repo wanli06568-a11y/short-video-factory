@@ -1,5 +1,5 @@
 <template>
-  <div class="layout-container">
+  <div class="layout-container" :class="{ 'is-mac': isMac }" :style="layoutStyle">
     <div class="logo" v-if="!route.meta.hideAppIcon">
       <img src="/icon.png" alt="" />
       <span>{{ t('app.name') }}</span>
@@ -31,35 +31,82 @@
           </v-list>
         </v-menu>
       </div>
-      <div class="control-btn control-btn-min" @click="handleMin">
-        <v-icon icon="mdi-window-minimize" size="small" />
+      <div class="window-no-drag">
+        <v-menu location="bottom right">
+          <template v-slot:activator="{ props }">
+            <div class="control-btn control-btn-zoom" v-bind="props">
+              <v-icon icon="mdi-magnify-plus-outline" />
+            </div>
+          </template>
+          <v-list
+            class="p-2 space-y-1"
+            activatable
+            :activated="[appStore.zoomFactor]"
+            @update:activated="handleChangeZoom"
+          >
+            <v-list-item
+              v-for="(item, index) in zoomDisplayOptions"
+              :key="index"
+              :value="item.value"
+              color="primary"
+              density="compact"
+              rounded
+            >
+              <v-list-item-title>{{ item.label }}</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
       </div>
-      <div class="control-btn control-btn-max" @click="handleMax">
-        <v-icon icon="mdi-window-maximize" size="small" v-if="!windowIsMaxed" />
-        <v-icon icon="mdi-window-restore" size="small" v-else />
-      </div>
-      <div class="control-btn control-btn-close" @click="handleClose">
-        <v-icon icon="mdi-window-close" size="small" />
-      </div>
+      <template v-if="!isMac">
+        <div class="control-btn control-btn-min" @click="handleMin">
+          <v-icon icon="mdi-window-minimize" size="small" />
+        </div>
+        <div class="control-btn control-btn-max" @click="handleMax">
+          <v-icon icon="mdi-window-maximize" size="small" v-if="!windowIsMaxed" />
+          <v-icon icon="mdi-window-restore" size="small" v-else />
+        </div>
+        <div class="control-btn control-btn-close" @click="handleClose">
+          <v-icon icon="mdi-window-close" size="small" />
+        </div>
+      </template>
     </div>
     <RouterView />
   </div>
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTranslation } from 'i18next-vue'
 import { i18nLanguages } from '~/electron/i18n/common-options'
+import { useAppStore } from '@/store'
+import { initializeAnalyticsActivityTracking, setAnalyticsContext } from '@/lib/analytics'
 
 const { i18next, t } = useTranslation()
+const appStore = useAppStore()
 // const lang = ref(i18next.language)
 // console.log('i18next.language', i18next.language)
 
-document.title = t('app.name')
+const syncAnalyticsContext = () => {
+  const title = String(t('app.name'))
+  document.title = title
+  setAnalyticsContext({
+    title,
+    locale: appStore.locale || i18next.resolvedLanguage || i18next.language || 'zh-CN',
+  })
+}
 
 const route = useRoute()
+const isMac = window.electron.platform === 'darwin'
+const layoutStyle = {
+  '--window-control-mask-width': isMac ? '84px' : '210px',
+}
 const windowIsMaxed = ref(false)
+
+const zoomDisplayOptions = appStore.zoomOptions.map((factor) => ({
+  value: factor,
+  label: `${Math.round(factor * 100)}%`,
+}))
 
 const handleChangeLanguage = (lng: unknown) => {
   console.log('handleChangeLanguage', lng)
@@ -67,6 +114,22 @@ const handleChangeLanguage = (lng: unknown) => {
     window.i18n.changeLanguage((lng as string[])[0])
   }
 }
+
+const handleChangeZoom = (factor: unknown) => {
+  const zoomFactor = (factor as number[])[0]
+  if (zoomFactor) {
+    window.electron.setZoomFactor(zoomFactor)
+    appStore.updateZoomFactor(zoomFactor)
+  }
+}
+
+onMounted(() => {
+  window.electron.setZoomFactor(appStore.zoomFactor)
+  initializeAnalyticsActivityTracking()
+  syncAnalyticsContext()
+})
+
+watch(() => appStore.locale, syncAnalyticsContext)
 
 window.addEventListener('resize', async () => {
   windowIsMaxed.value = await window.electron.isWinMaxed()
@@ -112,6 +175,14 @@ const handleClose = () => {
     }
   }
 
+  &.is-mac {
+    .logo {
+      padding-left: 84px;
+      pointer-events: none;
+      -webkit-app-region: no-drag;
+    }
+  }
+
   .window-control-bar {
     position: absolute;
     z-index: 9999;
@@ -131,6 +202,7 @@ const handleClose = () => {
       width: 42px;
       height: var(--title-bar-height);
       box-sizing: border-box;
+      -webkit-app-region: no-drag;
 
       &:hover {
         @apply bg-gray-200;
