@@ -91,6 +91,8 @@ describe('Home video render flow', () => {
     mocks.synthesizeSpeech.mockReset()
     mocks.getVideoSegments.mockReset()
     mocks.random.integer.mockReturnValue(0)
+    vi.spyOn(console, 'info').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
   })
 
   it.each([
@@ -183,6 +185,15 @@ describe('Home video render flow', () => {
         expect(storeState.renderStatus).toBe(mocks.RenderStatus.None)
         expect(mocks.toast.success).not.toHaveBeenCalled()
         expect(mocks.toast.info).not.toHaveBeenCalledWith('features.render.info.batchNext')
+        expect(console.info).toHaveBeenCalledWith(
+          '[Generation]',
+          expect.objectContaining({
+            event: 'task_finished',
+            outcome: 'cancelled',
+            stage: 'export',
+            item: 1,
+          }),
+        )
       } finally {
         wrapper.unmount()
         document.body.innerHTML = ''
@@ -190,10 +201,21 @@ describe('Home video render flow', () => {
     },
   )
 
-  it.each([1, 3])('completes exactly %s successful renders', async (count) => {
+  it.each([
+    { count: 1, bgmMode: 'none' },
+    { count: 3, bgmMode: 'none' },
+    { count: 3, bgmMode: 'fixed' },
+    { count: 3, bgmMode: 'random' },
+  ])('completes $count successful renders with $bgmMode audio', async ({ count, bgmMode }) => {
     const storeState = reactive({
       renderConfig: {
-        bgmPath: '',
+        bgmPath: '/music',
+        bgmMode,
+        bgmFile: '/music/fixed.wav',
+        segmentMode: bgmMode === 'fixed' ? 'whole' : count > 1 ? 'long' : undefined,
+        segmentOrder: 'filename',
+        videoFillMode: 'cover',
+        subtitleStyle: { fontSize: 64, color: '#FF0000' },
         outputSize: { width: 720, height: 1280 },
         outputPath: 'C:/video output',
         outputFileName: 'success',
@@ -208,7 +230,12 @@ describe('Home video render flow', () => {
       },
     })
     const renderDeferred = createDeferred<{ stdout: string; stderr: string; code: number }>()
-    const renderVideo = vi.fn(() => renderDeferred.promise)
+    const renderVideo = vi.fn((_params: { videoFillMode?: string }) => renderDeferred.promise)
+    const validateAudioFile = vi.fn().mockResolvedValue(true)
+    const listFilesFromFolder = vi
+      .fn()
+      .mockResolvedValue([{ name: 'random.WAV', path: '/music/random.WAV' }])
+    mocks.random.choice.mockImplementation((items) => items[0])
     mocks.store = storeState
     mocks.getTextForSynthesis.mockResolvedValue('A generated script')
     mocks.synthesizeSpeech.mockResolvedValue({ duration: 8, srtText: 'subtitle text' })
@@ -221,6 +248,8 @@ describe('Home video render flow', () => {
       value: {
         platform: 'win32',
         renderVideo,
+        validateAudioFile,
+        listFilesFromFolder,
         statTrack: vi.fn(() => Promise.resolve()),
       },
     })
@@ -247,6 +276,9 @@ describe('Home video render flow', () => {
       await vi.waitFor(() => expect(renderVideo).toHaveBeenCalledTimes(1))
       await wrapper.find('#render-trigger').trigger('click')
       expect(mocks.getTextForSynthesis).toHaveBeenCalledTimes(1)
+      storeState.renderConfig.segmentMode = 'standard'
+      storeState.renderConfig.segmentOrder = 'random'
+      storeState.renderConfig.videoFillMode = 'contain'
       renderDeferred.resolve({ stdout: '', stderr: '', code: 0 })
       await vi.waitFor(() => expect(renderVideo).toHaveBeenCalledTimes(count))
       await vi.waitFor(() => expect(storeState.batchProgress?.running ?? false).toBe(false))
@@ -257,7 +289,39 @@ describe('Home video render flow', () => {
       expect(mocks.synthesizeSpeech).toHaveBeenCalledWith(
         expect.objectContaining({ text: 'A generated script', withCaption: true }),
       )
-      expect(mocks.getVideoSegments).toHaveBeenCalledWith({ duration: 8 })
+      expect(mocks.getVideoSegments).toHaveBeenCalledTimes(count)
+      for (const [options] of mocks.getVideoSegments.mock.calls) {
+        expect(options).toEqual({
+          duration: 8,
+          settings:
+            bgmMode === 'fixed'
+              ? { mode: 'whole', order: 'filename' }
+              : {
+                  mode: count > 1 ? 'long' : 'standard',
+                  minDurationMs: 2000,
+                  maxDurationMs: count > 1 ? 30_000 : 15_000,
+                },
+          signal: expect.any(AbortSignal),
+        })
+      }
+      for (const call of renderVideo.mock.calls) {
+        expect(call[0]).toEqual(expect.objectContaining({ videoFillMode: 'cover' }))
+      }
+      expect(renderVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audioFiles: expect.objectContaining({
+            bgm:
+              bgmMode === 'none'
+                ? undefined
+                : bgmMode === 'fixed'
+                  ? '/music/fixed.wav'
+                  : '/music/random.WAV',
+          }),
+          subtitleStyle: { fontSize: 64, color: '#FF0000' },
+        }),
+      )
+      expect(validateAudioFile).toHaveBeenCalledTimes(bgmMode === 'fixed' ? count : 0)
+      expect(listFilesFromFolder).toHaveBeenCalledTimes(bgmMode === 'random' ? count : 0)
       expect(mocks.getTextForSynthesis.mock.invocationCallOrder[0]).toBeLessThan(
         mocks.synthesizeSpeech.mock.invocationCallOrder[0],
       )
@@ -267,6 +331,31 @@ describe('Home video render flow', () => {
       expect(mocks.getVideoSegments.mock.invocationCallOrder[0]).toBeLessThan(
         renderVideo.mock.invocationCallOrder[0],
       )
+      const [params] = renderVideo.mock.calls[0] as unknown as [
+        {
+          diagnosticContext: { operationId: string; batchId?: string }
+        },
+      ]
+      const context = params.diagnosticContext
+      expect(console.info).toHaveBeenCalledWith(
+        '[Generation]',
+        expect.objectContaining({
+          event: 'task_finished',
+          operationId: context.operationId,
+          outcome: 'succeeded',
+        }),
+      )
+      if (count > 1) {
+        expect(console.info).toHaveBeenCalledWith(
+          '[Generation]',
+          expect.objectContaining({
+            event: 'batch_finished',
+            batchId: context.batchId,
+            completed: count,
+            stopReason: 'completed',
+          }),
+        )
+      }
     } finally {
       wrapper.unmount()
       document.body.innerHTML = ''
@@ -335,13 +424,23 @@ describe('Home video render flow', () => {
       expect(mocks.toast.success).not.toHaveBeenCalled()
       expect(mocks.toast.error).toHaveBeenCalledTimes(1)
       expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(consoleError).toHaveBeenCalledWith(
+        '[Generation]',
+        expect.objectContaining({
+          event: 'task_finished',
+          stage: 'export',
+          outcome: 'failed',
+          item: 1,
+          error: expect.objectContaining({ message: 'encoder failed' }),
+        }),
+      )
     } finally {
       wrapper.unmount()
       document.body.innerHTML = ''
     }
   })
 
-  it('aborts in-flight TTS and does not begin rendering after cancellation', async () => {
+  it.each(['TTS', 'media planning'])('aborts in-flight %s before rendering', async (stage) => {
     const storeState = reactive({
       renderConfig: {
         bgmPath: '',
@@ -356,27 +455,20 @@ describe('Home video render flow', () => {
         this.renderStatus = status
       },
     })
-    const ttsDeferred = createDeferred<{ duration: number; srtText: string }>()
     const renderVideo = vi.fn(() => Promise.resolve({ stdout: '', stderr: '', code: 0 }))
     const statTrack = vi.fn((_payload: { title: string }) => Promise.resolve())
     mocks.store = storeState
     mocks.getTextForSynthesis.mockResolvedValue('A generated script')
-    mocks.synthesizeSpeech.mockImplementation((options: { abortSignal: AbortSignal }) => {
-      options.abortSignal.addEventListener(
-        'abort',
-        () => {
-          const error = new Error('cancelled')
-          error.name = 'AbortError'
-          ttsDeferred.reject(error)
-        },
-        { once: true },
-      )
-      return ttsDeferred.promise
-    })
-    mocks.getVideoSegments.mockResolvedValue({
-      videoFiles: ['C:/video assets/scene 1.mp4'],
-      timeRanges: [['1.000', '9.000']],
-    })
+    const waitForAbort = (signal: AbortSignal) =>
+      new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    if (stage === 'TTS') {
+      mocks.synthesizeSpeech.mockImplementation(({ abortSignal }) => waitForAbort(abortSignal))
+    } else {
+      mocks.synthesizeSpeech.mockResolvedValue({ duration: 8, srtText: 'subtitle text' })
+      mocks.getVideoSegments.mockImplementation(({ signal }) => waitForAbort(signal))
+    }
     Object.defineProperty(window, 'electron', {
       configurable: true,
       value: {
@@ -406,14 +498,14 @@ describe('Home video render flow', () => {
 
     try {
       await wrapper.find('#render-trigger').trigger('click')
-      await vi.waitFor(() => expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(1))
-      const request = mocks.synthesizeSpeech.mock.calls[0][0] as {
-        abortSignal: AbortSignal
-      }
-      expect(request.abortSignal.aborted).toBe(false)
+      const stageCall = stage === 'TTS' ? mocks.synthesizeSpeech : mocks.getVideoSegments
+      await vi.waitFor(() => expect(stageCall).toHaveBeenCalledTimes(1))
+      const { abortSignal, signal } = stageCall.mock.calls[0][0]
+      const activeSignal: AbortSignal = abortSignal ?? signal
+      expect(activeSignal.aborted).toBe(false)
 
       await wrapper.find('#cancel-trigger').trigger('click')
-      expect(request.abortSignal.aborted).toBe(true)
+      expect(activeSignal.aborted).toBe(true)
       await flushPromises()
 
       expect(renderVideo).not.toHaveBeenCalled()
@@ -483,6 +575,100 @@ describe('Home video render flow', () => {
       document.body.innerHTML = ''
     }
   })
+
+  it.each(['subtitle_warning', 'continue_after_failure', 'consecutive_failures'] as const)(
+    'logs batch outcome for %s',
+    async (scenario) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const storeState = reactive({
+        renderConfig: {
+          bgmPath: '',
+          outputSize: { width: 720, height: 1280 },
+          outputPath: '/output',
+          outputFileName: 'video',
+          outputFileExt: '.mp4',
+        },
+        autoBatch: true,
+        batchConfig: { count: 5, onError: scenario === 'subtitle_warning' ? 'stop' : 'continue' },
+        batchProgress: null as { running: boolean } | null,
+        renderStatus: mocks.RenderStatus.None,
+        updateRenderStatus(status: number) {
+          this.renderStatus = status
+        },
+      })
+      mocks.store = storeState
+      mocks.getTextForSynthesis.mockResolvedValue('private script')
+      mocks.synthesizeSpeech.mockResolvedValue({ duration: 8, srtText: 'private caption' })
+      if (scenario === 'consecutive_failures')
+        mocks.synthesizeSpeech.mockRejectedValue(new Error('TTS timeout'))
+      if (scenario === 'continue_after_failure')
+        mocks.synthesizeSpeech.mockRejectedValueOnce(new Error('TTS timeout'))
+      mocks.getVideoSegments.mockResolvedValue({ videoFiles: [], timeRanges: [] })
+      const renderVideo = vi.fn().mockResolvedValue({ code: 0 })
+      if (scenario === 'subtitle_warning')
+        renderVideo.mockResolvedValueOnce({ code: 0, subtitleExportError: 'EACCES subtitle' })
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: { platform: 'win32', renderVideo },
+      })
+      const wrapper = mount(Home, {
+        global: {
+          stubs: {
+            TextGenerate: TextGenerateStub,
+            VideoManage: VideoManageStub,
+            TtsControl: TtsControlStub,
+            VideoRender: VideoRenderStub,
+            GenerationOptions: true,
+            TopBar: true,
+          },
+        },
+      })
+      try {
+        await wrapper.find('#render-trigger').trigger('click')
+        await vi.waitFor(() => expect(storeState.batchProgress?.running).toBe(false))
+        const summary =
+          scenario === 'subtitle_warning'
+            ? { completed: 1, failed: 0, warnings: 1, stopReason: 'generation_failed' }
+            : scenario === 'consecutive_failures'
+              ? { completed: 0, failed: 3, stopReason: 'consecutive_failures' }
+              : { completed: 4, failed: 1, stopReason: 'completed' }
+        expect(console.info).toHaveBeenCalledWith(
+          '[Generation]',
+          expect.objectContaining({
+            event: 'batch_finished',
+            batchId: expect.any(String),
+            ...summary,
+          }),
+        )
+        if (scenario === 'subtitle_warning') {
+          expect(console.warn).toHaveBeenCalledWith(
+            '[Generation]',
+            expect.objectContaining({
+              event: 'subtitle_export_warning',
+              item: 1,
+              stage: 'export',
+              videoSucceeded: true,
+              error: { message: 'EACCES subtitle' },
+            }),
+          )
+        } else {
+          expect(console.error).toHaveBeenCalledWith(
+            '[Generation]',
+            expect.objectContaining({
+              event: 'task_finished',
+              item: 1,
+              stage: 'tts',
+              outcome: 'failed',
+              errorCode: 'network_timeout',
+            }),
+          )
+        }
+        expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain('private script')
+      } finally {
+        wrapper.unmount()
+      }
+    },
+  )
 
   it.each([
     ['missing', { srtText: 'caption' }],

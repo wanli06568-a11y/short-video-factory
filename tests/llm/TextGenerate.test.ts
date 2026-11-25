@@ -7,6 +7,7 @@ import * as components from 'vuetify/components'
 import * as directives from 'vuetify/directives'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import TextGenerate from '../../src/views/Home/components/TextGenerate.vue'
+import DurationEstimate from '../../src/views/Home/components/DurationEstimate.vue'
 import { defaultCopywritingConfig, defaultLlmConfig } from '../../src/lib/llm/config'
 import type { CopywritingStatus, LlmConfig } from '../../src/lib/llm/types'
 
@@ -90,6 +91,117 @@ describe('TextGenerate configuration and request lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.generateCopywriting.mockReset()
+  })
+
+  it('keeps the configuration tabs outside the scroll body and resets scroll on tab changes', async () => {
+    const { wrapper, findDialogButton } = createHost()
+    try {
+      findDialogButton('common.buttons.config')!.click()
+      await flushPromises()
+      const card = document.body.querySelector('.llm-config-card')!
+      const tabs = card.querySelector('.llm-config-tabs')!
+      const body = card.querySelector('.llm-config-body')!
+      expect(tabs.parentElement).toBe(card)
+      expect(body.contains(tabs)).toBe(false)
+      expect(card.querySelector('.v-card-actions')!.parentElement).toBe(card)
+      body.scrollTop = 120
+      findDialogButton('features.llm.config.advancedTab')!.click()
+      await flushPromises()
+      const advancedBody = card.querySelector('.llm-config-body')!
+      expect(advancedBody).not.toBe(body)
+      expect(advancedBody.scrollTop).toBe(0)
+      expect(card.querySelector('.llm-config-tabs')).toBe(tabs)
+    } finally {
+      wrapper.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('focuses the custom prompt after selecting its mode and saves typed text', async () => {
+    const { wrapper, storeState, findDialogButton } = createHost()
+    try {
+      findDialogButton('common.buttons.config')!.click()
+      await flushPromises()
+      findDialogButton('features.llm.config.copywritingTab')!.click()
+      await flushPromises()
+      const opener = document.body.querySelector('.llm-config-panel .v-select .v-field')!
+      opener.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      await flushPromises()
+      const custom = [...document.body.querySelectorAll<HTMLElement>('.v-list-item')].find(
+        (item) => item.textContent?.trim() === 'features.llm.config.custom',
+      )
+      expect(custom).toBeDefined()
+      custom!.click()
+      await vi.waitFor(() => {
+        const prompt = document.body.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="features.llm.config.customPrompt"]',
+        )
+        expect(prompt).not.toBeNull()
+        expect(document.activeElement).toBe(prompt)
+      })
+      const prompt = document.activeElement as HTMLTextAreaElement
+      prompt.value = '自定义口播提示词'
+      prompt.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushPromises()
+      findDialogButton('common.buttons.save')!.click()
+      await flushPromises()
+      expect(storeState.copywritingConfig.customSystemPrompt).toBe('自定义口播提示词')
+    } finally {
+      wrapper.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('defaults to recognizing thinking tags and saves a manual opt-out', async () => {
+    const { wrapper, storeState, findDialogButton } = createHost()
+    try {
+      findDialogButton('common.buttons.config')!.click()
+      await flushPromises()
+      findDialogButton('features.llm.config.advancedTab')!.click()
+      await flushPromises()
+      const toggle = document.body.querySelector<HTMLInputElement>(
+        '.llm-config-panel .v-switch input[type="checkbox"]',
+      )!
+      expect(toggle.checked).toBe(true)
+      toggle.click()
+      await flushPromises()
+      findDialogButton('common.buttons.save')!.click()
+      await flushPromises()
+      expect(storeState.llmConfig.decodeLeadingThink).toBe(false)
+    } finally {
+      wrapper.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('lays out advanced pairs and header rows separately while preserving header editing', async () => {
+    const { wrapper, storeState, findDialogButton } = createHost()
+    try {
+      findDialogButton('common.buttons.config')!.click()
+      await flushPromises()
+      findDialogButton('features.llm.config.advancedTab')!.click()
+      await flushPromises()
+      expect(document.body.querySelectorAll('.llm-config-grid')).toHaveLength(2)
+      findDialogButton('common.buttons.add')!.click()
+      await flushPromises()
+      const row = document.body.querySelector('.llm-header-row')!
+      const inputs = row.querySelectorAll('input')
+      expect(inputs).toHaveLength(2)
+      expect(row.querySelector('.llm-header-remove')).not.toBeNull()
+      for (const [index, value] of ['X-Trace', 'trace-value'].entries()) {
+        inputs[index].value = value
+        inputs[index].dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      await flushPromises()
+      findDialogButton('common.buttons.save')!.click()
+      await flushPromises()
+      expect(storeState.llmConfig.customHeaders).toEqual([
+        { name: 'X-Trace', value: 'trace-value' },
+      ])
+    } finally {
+      wrapper.unmount()
+      document.body.innerHTML = ''
+    }
   })
 
   it('keeps the real Vuetify stop control enabled while a connection test is pending', async () => {
@@ -185,7 +297,7 @@ describe('TextGenerate configuration and request lifecycle', () => {
       const signal = (mocks.generateCopywriting.mock.calls[0][0] as { abortSignal: AbortSignal })
         .abortSignal
 
-      findDialogButton('common.buttons.close')!.click()
+      findDialogButton('common.buttons.cancel')!.click()
       await flushPromises()
       expect(signal.aborted).toBe(true)
       expect(storeState.llmConfig.apiUrl).toBe('https://example.com/v1')
@@ -431,6 +543,30 @@ describe('TextGenerate configuration and request lifecycle', () => {
     }
   })
 
+  it('shares the existing input details row with the persistent character counter', async () => {
+    vi.useFakeTimers()
+    const { wrapper } = createHost()
+    try {
+      const text = '欢迎来到短视频工厂，今天一起分享生活中的小美好。'
+      const outputField = wrapper.findAllComponents({ name: 'VTextarea' }).at(-1)!
+      await outputField.setValue(text)
+      await vi.advanceTimersByTimeAsync(200)
+      const details = outputField.find('.v-input__details')
+      const estimate = details.find('[data-testid="duration-estimate"]')
+      const counter = details.find('.v-counter')
+      expect(estimate.exists()).toBe(true)
+      expect(counter.text()).toBe(String(text.length))
+      expect(estimate.element.closest('.v-input__details')).toBe(details.element)
+      expect(counter.element.closest('.v-input__details')).toBe(details.element)
+      expect(outputField.findAll('.v-input__details')).toHaveLength(1)
+      expect(wrapper.findAllComponents(DurationEstimate)).toHaveLength(1)
+    } finally {
+      wrapper.unmount()
+      document.body.innerHTML = ''
+      vi.useRealTimers()
+    }
+  })
+
   it('allows TTS text only from completed or edited states', async () => {
     const { wrapper, storeState } = createHost()
     try {
@@ -441,13 +577,20 @@ describe('TextGenerate configuration and request lifecycle', () => {
       storeState.copywritingStatus = 'completed'
       await expect(exposed.getTextForSynthesis()).resolves.toBe('')
       await outputField!.setValue('朗读正文')
+      const durationEstimate = wrapper.findComponent(DurationEstimate)
+      expect(durationEstimate.props('text')).toBe('朗读正文')
+      expect(durationEstimate.props('text')).not.toBe(storeState.prompt)
 
       for (const status of ['generating', 'cancelled', 'failed', 'truncated'] as const) {
         storeState.copywritingStatus = status
+        await flushPromises()
+        expect(durationEstimate.props('ready')).toBe(false)
         await expect(exposed.getTextForSynthesis()).rejects.toThrow()
       }
 
       storeState.copywritingStatus = 'completed'
+      await flushPromises()
+      expect(durationEstimate.props('ready')).toBe(true)
       await expect(exposed.getTextForSynthesis()).resolves.toBe('朗读正文')
       storeState.copywritingStatus = 'edited'
       await expect(exposed.getTextForSynthesis()).resolves.toBe('朗读正文')

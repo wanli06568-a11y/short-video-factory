@@ -1,4 +1,91 @@
 {
+  "durationEstimate": {
+    "label": "Approx. length: {{duration}}",
+    "hint": "Playback length ([h:]min:sec), not export processing time. Estimated locally at a normal reading pace, for reference only. Actual length depends on the voice, speech rate and pronunciation."
+  },
+  "renderSettings": {
+    "loading": "Generating preview…",
+    "sections": {
+      "subtitle": "Subtitles",
+      "typography": "Typography",
+      "outline": "Outline",
+      "layout": "Layout"
+    },
+    "output": "Output",
+    "editing": "Editing",
+    "segmentMode": {
+      "label": "Clip selection mode",
+      "standard": { "title": "Standard clips (recommended)", "hint": "A sweet spot for viewer attention: faster pacing with random cuts, up to 15 seconds per clip." },
+      "long": { "title": "Long clips", "hint": "Best when you have fewer source videos. Switch less often, with clips up to 30 seconds each." },
+      "whole": { "title": "Whole clips", "hint": "Best for pre-edited videos. Use full clips without random cuts, trimming only the last clip if needed." }
+    },
+    "segmentOrder": {
+      "label": "Clip order",
+      "random": {
+        "title": "Random order (default)",
+        "hint": "Shuffle the clips for each video, then join them from the start of each source."
+      },
+      "filename": {
+        "title": "Filename order",
+        "hint": "Join clips in filename order. To set the playback order, number your files, such as 01-intro, 02-demo, and 03-outro."
+      }
+    },
+    "videoFill": {
+      "label": "Frame fit",
+      "contain": {
+        "title": "Show full image (default)",
+        "hint": "Keep the full image. If the aspect ratios differ, black bars appear above and below or on the sides."
+      },
+      "cover": {
+        "title": "Crop to fill",
+        "hint": "Scale and center the source to fill the frame. Anything outside the frame is cropped."
+      }
+    },
+    "subtitle": "Subtitles",
+    "audio": "Audio",
+    "preview": "Subtitle preview",
+    "previewHint": "Black-background subtitle preview; no video footage",
+    "previewText": "Preview text (does not change your script)",
+    "sample": "Welcome to Short Video Factory. Create amazing videos!",
+    "previewError": "Preview failed. Please retry.",
+    "retry": "Retry",
+    "preset": "Video size preset",
+    "custom": "Custom",
+    "swap": "Swap width and height",
+    "invalidSize": "Width and height must be even numbers from 64 to 4096",
+    "fontSize": "Font size",
+    "fontHint": "Relative to a 1080px-wide frame; scales with output width. Long text shrinks automatically.",
+    "color": "Text color",
+    "strokeColor": "Outline color",
+    "strokeWidth": "Outline width",
+    "position": "Position",
+    "offset": "Vertical offset (negative moves up)",
+    "maxLines": "Maximum lines",
+    "reset": "Reset subtitle style",
+    "top": "Top",
+    "middle": "Middle",
+    "bottom": "Bottom",
+    "lines1": "Single line",
+    "lines2": "Two lines",
+    "bgmMode": "Background music",
+    "none": "None",
+    "random": "Random audio",
+    "fixed": "Fixed audio",
+    "audioFolder": "Audio folder",
+    "audioFile": "Audio file",
+    "randomHint": "Choose one audio file randomly per video; repeats are allowed in a batch. Supports MP3, WAV, M4A, AAC, FLAC and OGG.",
+    "fixedHint": "Use the same audio file for every video. Voiceover settings are unchanged.",
+    "audioRequired": "Please select an audio file or folder",
+    "audioUnavailable": "Audio file is unreadable, or the folder contains no supported audio.",
+    "sizes": {
+      "1080x1920": "Portrait HD · 1080 × 1920 (9:16)",
+      "720x1280": "Portrait · 720 × 1280 (9:16)",
+      "1920x1080": "Landscape HD · 1920 × 1080 (16:9)",
+      "1280x720": "Landscape · 1280 × 720 (16:9)",
+      "1080x1080": "Square · 1080 × 1080 (1:1)",
+      "1080x1440": "Portrait · 1080 × 1440 (3:4)"
+    }
+  },
   "app": {
     "name": "AI Short Video Factory"
   },
@@ -12,6 +99,7 @@
       "quit": "Quit"
     },
     "language": "Language",
+    "followSystem": "Follow system",
     "edit": {
       "root": "Edit",
       "undo": "Undo",
@@ -40,6 +128,9 @@
   },
   "common": {
     "buttons": {
+      "selectFile": "Select file",
+      "selectFolder": "Select folder",
+      "cancel": "Cancel",
       "generate": "Generate",
       "stop": "Stop",
       "config": "Configure",
@@ -138,6 +229,7 @@
       "config": {
         "promptLabel": "Prompt",
         "outputLabel": "Output Text (editable)",
+        "rawOutputLabel": "Raw output (not used for narration)",
         "configTitle": "Configure LLM API",
         "modelName": "Model Name",
         "apiUrl": "API URL",
@@ -147,10 +239,9 @@
         "connectionTab": "Connection",
         "copywritingTab": "Copywriting",
         "advancedTab": "Advanced",
-        "protocolCompatible": "OpenAI-compatible API",
-        "protocolChat": "OpenAI Chat Completions",
-        "protocolResponses": "OpenAI Responses",
-        "protocolAnthropic": "Anthropic Messages/compatible API",
+        "protocolCompatible": "OpenAI-compatible format (Recommended)",
+        "protocolResponses": "OpenAI Responses format",
+        "protocolAnthropic": "Claude Messages format",
         "requestUrl": "Final request URL",
         "apiUrlRequired": "Enter an API base URL",
         "modelNameRequired": "Enter a model name",
@@ -180,6 +271,8 @@
         "clearHistoryConfirm": "Clear locally stored recent scripts and strategy rotation history?",
         "advanced": "Advanced connection settings",
         "instructionDelivery": "Instruction delivery",
+        "decodeLeadingThink": "Recognize leading thinking tags",
+        "decodeLeadingThinkHint": "Separates a leading <think>…</think> by default, regardless of prompt mode. Turn this off if your script should begin with that tag.",
         "standardDelivery": "Standard (recommended)",
         "userMessageDelivery": "Merge into user message",
         "timeoutSeconds": "Request timeout (seconds)",
@@ -209,6 +302,7 @@
         "cancelled": "Generation was cancelled",
         "failed": "No valid text was received",
         "truncated": "Generation is incomplete",
+        "unclosedThinkingOutput": "The opening thinking tag was not closed; the narration could not be identified",
         "textNotReady": "The current script is not ready for speech synthesis",
         "historyClearFailed": "Could not clear recent records. Check local storage availability."
       },
@@ -271,6 +365,7 @@
         "audioDurationInvalid": "Audio duration is invalid. Please check the speech synthesis result or audio file",
         "noVideoAssets": "No available video assets. Please select an assets folder containing MP4 videos",
         "noUsableVideoAssets": "No readable video assets. Check whether the files are corrupted or use a supported codec",
+        "segmentLimit": "More than {{limit}} clips are needed. Shorten the narration or use longer video assets",
         "durationInsufficient": "Total available video assets duration is insufficient"
       },
       "success": {

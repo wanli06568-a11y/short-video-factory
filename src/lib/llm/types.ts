@@ -1,8 +1,4 @@
-export type LlmProtocol =
-  | 'openai-compatible'
-  | 'openai-chat'
-  | 'openai-responses'
-  | 'anthropic-messages'
+export type LlmProtocol = 'openai-compatible' | 'openai-responses' | 'anthropic-messages'
 
 export type AnthropicAuthMode = 'api-key' | 'bearer'
 export type InstructionDelivery = 'standard' | 'user-message'
@@ -50,6 +46,7 @@ export interface LlmConfig {
   topP?: number
   anthropicAuthMode: AnthropicAuthMode
   instructionDelivery: InstructionDelivery
+  decodeLeadingThink?: boolean
   customHeaders: CustomHeader[]
 }
 
@@ -64,6 +61,7 @@ export interface GenerationResult {
   text: string
   status: Extract<CopywritingStatus, 'completed' | 'cancelled' | 'failed' | 'truncated'>
   finishReason?: string
+  unclosedThinkingOutput?: string
   similarityWarning?: boolean
   rewriteFailed?: boolean
 }

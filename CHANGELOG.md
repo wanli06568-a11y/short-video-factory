@@ -4,6 +4,78 @@ All significant changes to this project will be recorded in this file.
 
 此项目的所有显著更改都将记录在此文件中。
 
+## [v1.4.1] - 2026-11-20
+
+<!-- i18n:en:start -->
+
+### Added
+
+- Add three footage modes: standard segments, longer segments of up to 30 seconds for smaller media libraries, and whole clips for pre-edited footage
+- Support stitching clips in filename order, so prefixes like `01-` and `02-` can set the playback order
+- Add frame fit options: keep the whole image or crop it to fill the output frame without black bars
+- Separate output and editing settings into tabs
+- Add a Japanese README
+
+### Fixed & Optimized
+
+- Fix Edge TTS segment length limits when synthesizing long scripts
+- Separate leading `<think>` blocks from generated copy by default. If the tag is not closed, the raw output remains viewable but is not used for voiceover
+- Fix focus in the prompt editor
+- Fix overflow in the output width and height fields
+<!-- i18n:en:end -->
+
+<!-- i18n:zh-CN:start -->
+
+### 新增
+
+- 新增标准分段、长分段和整段使用三种模式：素材较少时可用长分段减少画面切换，每段最长 30 秒；预剪好的素材可整段使用
+- 支持按文件名顺序拼接素材，可用 `01-`、`02-` 等编号指定播放顺序
+- 新增「完整显示」和「裁切铺满」两种画面填充方式，可选择保留完整画面，或裁切以避免黑边
+- 将输出与剪辑设置拆为独立标签页
+- 新增日文 README
+
+### 修复与优化
+
+- 修复 Edge TTS 合成长文案时的分段超限问题
+- 默认将文案开头的 `<think>` 思考内容与正文分离；标签未闭合时可查看原始输出，但不会用于配音
+- 修复提示词编辑框的焦点问题
+- 修复输出设置中宽高输入框溢出的问题
+<!-- i18n:zh-CN:end -->
+
+## [v1.4.0] - 2026-11-09
+
+<!-- i18n:en:start -->
+
+### Added
+
+- Add a dedicated video composition settings dialog with grouped controls, subtitle style preview, and audio selection
+- Add estimated output duration to help plan video composition
+- Add system language detection and a persistent language preference
+- Add generation diagnostics with batch and task context, detailed error tracking, and sensitive-field redaction
+
+### Fixed & Optimized
+
+- Unify subtitle composition through the in-house rendering engine and remove the FFmpeg native subtitle fallback
+- Simplify AI API format selection and merge OpenAI chat configuration with automatic migration of existing settings
+- Refine the main window size and composition interface layout
+<!-- i18n:en:end -->
+
+<!-- i18n:zh-CN:start -->
+
+### 新增
+
+- 新增独立的视频合成配置面板，支持分区设置、字幕样式预览与音频选择
+- 新增成片时长预估，便于规划视频合成
+- 新增系统语言识别与语言偏好保存
+- 新增生成诊断日志，记录批次与任务上下文、详细错误信息，并对敏感字段脱敏
+
+### 修复与优化
+
+- 统一使用自研字幕引擎完成字幕合成，移除 FFmpeg 原生字幕回退路径
+- 简化 AI 接口格式选择，合并 OpenAI 对话配置并自动迁移已有设置
+- 优化主窗口尺寸与视频合成界面布局
+<!-- i18n:zh-CN:end -->
+
 ## [v1.3.0] - 2026-10-16
 
 <!-- i18n:en:start -->

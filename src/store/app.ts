@@ -9,6 +9,8 @@ import {
 } from '@/lib/llm/config'
 import type { CopywritingStatus, LlmConfig } from '@/lib/llm/types'
 import { normalizeBatchConfig, type BatchRunState } from '@/lib/batch'
+import { normalizeSubtitleStyle, normalizeVideoFillMode, type BgmMode } from '@/lib/render-config'
+import { normalizeSegmentMode, normalizeSegmentOrder, type SegmentMode } from '@/lib/video-segments'
 
 export enum RenderStatus {
   None,
@@ -23,7 +25,7 @@ export enum RenderStatus {
 export const useAppStore = defineStore(
   'app',
   () => {
-    // 国际化区域设置
+    // 空字符串表示跟随系统，非空值表示手动选择的语言
     const locale = ref('')
     const updateLocale = (newLocale: string) => {
       locale.value = newLocale
@@ -75,6 +77,12 @@ export const useAppStore = defineStore(
     // 合成配置
     const renderConfig = ref({
       bgmPath: '',
+      bgmMode: 'none' as BgmMode,
+      bgmFile: '',
+      segmentMode: 'standard' as SegmentMode,
+      segmentOrder: normalizeSegmentOrder(undefined),
+      videoFillMode: normalizeVideoFillMode(undefined),
+      subtitleStyle: normalizeSubtitleStyle(),
       outputSize: { width: 1080, height: 1920 },
       outputPath: '',
       outputFileName: '',
@@ -87,14 +95,42 @@ export const useAppStore = defineStore(
     const batchProgress = ref<BatchRunState | null>(null)
     const renderStatus = ref(RenderStatus.None)
     const updateRenderConfig = (
-      newConfig: Omit<typeof renderConfig.value, 'subtitlesEnabled' | 'exportSubtitles'> &
-        Partial<Pick<typeof renderConfig.value, 'subtitlesEnabled' | 'exportSubtitles'>>,
+      newConfig: Omit<
+        typeof renderConfig.value,
+        | 'subtitlesEnabled'
+        | 'exportSubtitles'
+        | 'bgmMode'
+        | 'bgmFile'
+        | 'subtitleStyle'
+        | 'segmentMode'
+        | 'segmentOrder'
+        | 'videoFillMode'
+      > &
+        Partial<
+          Pick<
+            typeof renderConfig.value,
+            | 'subtitlesEnabled'
+            | 'exportSubtitles'
+            | 'bgmMode'
+            | 'bgmFile'
+            | 'subtitleStyle'
+            | 'segmentMode'
+            | 'segmentOrder'
+            | 'videoFillMode'
+          >
+        >,
     ) => {
       renderConfig.value = {
         ...newConfig,
         outputSize: { ...newConfig.outputSize },
         subtitlesEnabled: newConfig.subtitlesEnabled !== false,
         exportSubtitles: newConfig.exportSubtitles === true,
+        bgmMode: newConfig.bgmMode ?? (newConfig.bgmPath ? 'random' : 'none'),
+        bgmFile: newConfig.bgmFile ?? '',
+        segmentMode: normalizeSegmentMode(newConfig.segmentMode),
+        segmentOrder: normalizeSegmentOrder(newConfig.segmentOrder),
+        videoFillMode: normalizeVideoFillMode(newConfig.videoFillMode),
+        subtitleStyle: normalizeSubtitleStyle(newConfig.subtitleStyle),
       }
     }
     const updateRenderStatus = (newStatus: RenderStatus) => {
@@ -148,6 +184,17 @@ export const useAppStore = defineStore(
   },
   {
     persist: {
+      serializer: {
+        serialize: JSON.stringify,
+        deserialize: (raw) => {
+          const state = JSON.parse(raw)
+          // Migrate before Pinia merges defaults, otherwise missing mode becomes "none".
+          if (state?.renderConfig && !state.renderConfig.bgmMode) {
+            state.renderConfig.bgmMode = state.renderConfig.bgmPath ? 'random' : 'none'
+          }
+          return state
+        },
+      },
       omit: [
         'genderList',
         'speedList',
@@ -156,29 +203,14 @@ export const useAppStore = defineStore(
         'renderStatus',
         'copywritingStatus',
       ],
-      beforeHydrate: (context) => {
-        // Pinia merges persisted state into default state before afterHydrate, so an old record
-        // without protocol would otherwise inherit the new openai-compatible default. Seed the
-        // migration target first; the subsequent nested patch keeps this protocol value.
-        try {
-          const serializedState = window.localStorage.getItem(context.store.$id)
-          const persistedState = serializedState ? JSON.parse(serializedState) : undefined
-          if (
-            persistedState?.llmConfig &&
-            typeof persistedState.llmConfig === 'object' &&
-            !('protocol' in persistedState.llmConfig)
-          ) {
-            context.store.llmConfig.protocol = 'openai-chat'
-          }
-        } catch {
-          // Let the persistence plugin retain its default state if legacy storage is malformed.
-        }
-      },
       afterHydrate: (context) => {
+        const persistedProtocol = context.store.llmConfig.protocol
         context.store.batchConfig = normalizeBatchConfig(context.store.batchConfig)
         context.store.updateRenderConfig(context.store.renderConfig)
         context.store.updateLLMConfig(context.store.llmConfig)
         context.store.updateCopywritingConfig(context.store.copywritingConfig)
+        // Hydration runs before persistence subscriptions, so save protocol migrations explicitly.
+        if (persistedProtocol !== context.store.llmConfig.protocol) context.store.$persist()
       },
     },
   },

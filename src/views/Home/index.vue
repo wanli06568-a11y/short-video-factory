@@ -63,6 +63,9 @@ import random from 'random'
 import { formatErrorForCopy } from '@/lib/error-copy'
 import { createAnalyticsOperationId, trackAnalytics } from '@/lib/analytics'
 import { runBatch, type BatchRunState } from '@/lib/batch'
+import { logGeneration } from '@/lib/generation-diagnostics'
+import { isAudioFile, normalizeVideoFillMode } from '@/lib/render-config'
+import { resolveSegmentSettings, type SegmentSettings } from '@/lib/video-segments'
 
 const toast = useToast()
 const appStore = useAppStore()
@@ -177,6 +180,7 @@ interface GenerationTask {
   finished: boolean
   metrics: Record<string, string | number | boolean>
   usage?: GenerationUsageSummary
+  segmentController?: AbortController
   finish?: (outcome: GenerationOutcome, error?: unknown) => void
 }
 
@@ -218,6 +222,18 @@ const finalizeBatch = (batch: BatchContext, stopReason: string) => {
   batch.finished = true
   batch.running = false
   batch.stopReason = stopReason
+  logGeneration(
+    'batch_finished',
+    { batchId: batch.id, item: batch.current, total: batch.total },
+    {
+      completed: batch.completedCount,
+      failed: batch.failedCount,
+      cancelled: batch.cancelledCount,
+      warnings: batch.warningCount,
+      stopReason,
+      durationMs: Math.round(performance.now() - batch.startedAt),
+    },
+  )
   trackAnalytics('batch_finished', {
     batch_id: batch.id,
     completed_count: batch.completedCount,
@@ -238,9 +254,14 @@ const handleRenderVideo = async () => {
   }
   generationRunning = true
   try {
+    const { segmentMode, segmentOrder, videoFillMode } = appStore.renderConfig
+    const editing = {
+      segments: resolveSegmentSettings(segmentMode, segmentOrder),
+      fill: normalizeVideoFillMode(videoFillMode),
+    }
     if (!appStore.autoBatch) {
       appStore.batchProgress = null
-      await renderSingleVideo()
+      await renderSingleVideo(editing)
       return
     }
     appStore.batchProgress = {
@@ -260,11 +281,16 @@ const handleRenderVideo = async () => {
       finished: false,
     }
     const batch = appStore.batchProgress
+    logGeneration(
+      'batch_started',
+      { batchId: batch.id, total: batch.total },
+      { onError: batch.onError },
+    )
     trackAnalytics('batch_started', { batch_id: batch.id })
     try {
       const reason = await runBatch(
         batch,
-        () => renderSingleVideo(batch),
+        () => renderSingleVideo(editing, batch),
         () => {
           TextGenerateInstance.value?.clearOutputText?.()
         },
@@ -278,6 +304,15 @@ const handleRenderVideo = async () => {
             warnings: batch.warningCount,
           }),
         )
+    } catch (error) {
+      logGeneration(
+        'batch_exception',
+        { batchId: batch.id, item: batch.current, total: batch.total },
+        {},
+        error,
+        'error',
+      )
+      throw error
     } finally {
       if (!batch.finished) finalizeBatch(batch, 'generation_failed')
     }
@@ -286,12 +321,34 @@ const handleRenderVideo = async () => {
   }
 }
 
-const renderSingleVideo = async (batchContext?: BatchContext) => {
+const renderSingleVideo = async (
+  editing: { segments: SegmentSettings; fill: ReturnType<typeof normalizeVideoFillMode> },
+  batchContext?: BatchContext,
+) => {
+  const segmentSettings = editing.segments
   const subtitlesEnabled = appStore.renderConfig.subtitlesEnabled !== false
   const exportSubtitles = appStore.renderConfig.exportSubtitles === true
+  const bgmMode =
+    appStore.renderConfig.bgmMode ?? (appStore.renderConfig.bgmPath ? 'random' : 'none')
   const operationId = createAnalyticsOperationId()
   const trigger = batchContext ? 'batch' : appStore.autoBatch ? 'batch' : 'manual'
+  const logContext = {
+    operationId,
+    ...(batchContext
+      ? { batchId: batchContext.id, item: batchContext.current, total: batchContext.total }
+      : {}),
+  }
+  logGeneration('task_started', logContext, {
+    trigger,
+    outputWidth: appStore.renderConfig.outputSize?.width,
+    outputHeight: appStore.renderConfig.outputSize?.height,
+    subtitlesEnabled,
+    exportSubtitles,
+    bgmEnabled: bgmMode !== 'none',
+    segmentMode: segmentSettings.mode,
+  })
   const blocked = (reason: string) => {
+    logGeneration('task_blocked', logContext, { reason, stage: 'preflight' }, undefined, 'warn')
     const now = Date.now()
     if (now - (recentlyBlockedAt.get(reason) ?? 0) >= 30_000) {
       recentlyBlockedAt.set(reason, now)
@@ -337,23 +394,31 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
   }
 
   let randomBgm: ListFilesFromFolderRecord | undefined = undefined
-  if (appStore.renderConfig.bgmPath) {
+  if (bgmMode !== 'none') {
     try {
-      const bgmList = (
-        await window.electron.listFilesFromFolder({
-          folderPath: appStore.renderConfig.bgmPath.replace(/\\/g, '/'),
+      if (bgmMode === 'fixed') {
+        const filePath = appStore.renderConfig.bgmFile
+        if (!(await window.electron.validateAudioFile(filePath)))
+          throw new Error(t('renderSettings.audioUnavailable'))
+        randomBgm = { path: filePath, name: filePath.split(/[\\/]/).pop() ?? filePath }
+      } else {
+        const bgmList = (
+          await window.electron.listFilesFromFolder({
+            folderPath: appStore.renderConfig.bgmPath.replace(/\\/g, '/'),
+          })
+        ).filter((asset) => isAudioFile(asset.name))
+        if (!bgmList.length) throw new Error(t('renderSettings.audioUnavailable'))
+        if (bgmList.length > 0) {
+          randomBgm = random.choice(bgmList)
+        }
+        console.debug('背景音乐素材读取完成', {
+          audioCount: bgmList.length,
+          selected: randomBgm?.name,
         })
-      ).filter((asset) => asset.name.toLowerCase().endsWith('.mp3'))
-      if (bgmList.length > 0) {
-        randomBgm = random.choice(bgmList)
       }
-      console.debug('背景音乐素材读取完成', {
-        mp3Count: bgmList.length,
-        selected: randomBgm?.name,
-      })
     } catch (error: any) {
       blocked('bgm_unavailable')
-      console.warn('获取背景音乐列表失败', error)
+      logGeneration('preflight_failed', logContext, { reason: 'bgm_unavailable' }, error, 'error')
       const errorMessage = error?.error?.message || error?.message || error
       toast.error({
         component: {
@@ -380,7 +445,10 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
   }
 
   const batch = batchContext ?? null
-  if (batch?.stopRequested) return
+  if (batch?.stopRequested) {
+    logGeneration('task_cancelled', logContext, { stage: 'preflight', reason: batch.stopReason })
+    return
+  }
 
   const task: GenerationTask = {
     id: operationId,
@@ -413,12 +481,14 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     const duration = Math.max(0, Math.floor(performance.now() - task.stageStartedAt))
     const key = `${task.stage}_duration_ms`
     task.metrics[key] = Number(task.metrics[key] ?? 0) + duration
+    logGeneration('stage_finished', logContext, { stage: task.stage, durationMs: duration })
   }
   const enterStage = (stage: GenerationStage) => {
     closeStage()
     task.stage = stage
     task.stageStartedAt = performance.now()
     task.metrics[`${stage}_entered`] = true
+    logGeneration('stage_started', logContext, { stage })
   }
   const finishTask = (outcome: GenerationOutcome, error?: unknown) => {
     if (task.finished) return
@@ -436,6 +506,18 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
       data.failed_stage = task.stage
     }
     if (outcome === 'failed') data.error_code = classifyError(error)
+    logGeneration(
+      'task_finished',
+      logContext,
+      {
+        outcome,
+        stage: task.stage,
+        durationMs: data.duration_ms as number,
+        errorCode: outcome === 'failed' ? classifyError(error) : undefined,
+      },
+      error,
+      outcome === 'failed' ? 'error' : 'info',
+    )
     if (task.usage) {
       data.text_source = task.usage.source
       data.llm_call_count = task.usage.callCount
@@ -471,6 +553,7 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     // 获取文案
     appStore.updateRenderStatus(RenderStatus.GenerateText)
     task.metrics.text_entered = true
+    logGeneration('stage_started', logContext, { stage: 'text' })
     const text = await TextGenerateInstance.value?.getTextForSynthesis()
     if (task.finished || appStore.renderStatus !== RenderStatus.GenerateText) return
     if (!text) throw new Error('Generated text was empty')
@@ -517,24 +600,29 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     }
     appStore.updateRenderStatus(RenderStatus.SegmentVideo)
     enterStage('media')
+    task.segmentController = new AbortController()
     const videoSegments = await VideoManageInstance.value?.getVideoSegments({
       duration: ttsResult.duration,
+      settings: segmentSettings,
+      signal: task.segmentController.signal,
     })!
-    await new Promise((resolve) => setTimeout(resolve, random.integer(1000, 3000)))
 
     // 合成视频
     // @ts-ignore
-    if (appStore.renderStatus !== RenderStatus.SegmentVideo) {
+    if (task.finished || appStore.renderStatus !== RenderStatus.SegmentVideo) {
       return
     }
     appStore.updateRenderStatus(RenderStatus.Rendering)
     enterStage('export')
     const renderResult = await window.electron.renderVideo({
+      diagnosticContext: logContext,
       ...videoSegments,
+      videoFillMode: editing.fill,
       audioFiles: {
         bgm: randomBgm?.path,
       },
       subtitleText: ttsResult.srtText,
+      subtitleStyle: { ...appStore.renderConfig.subtitleStyle },
       subtitlesEnabled,
       exportSubtitles,
       outputSize: {
@@ -556,6 +644,13 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     }
 
     if (renderResult.subtitleExportError) {
+      logGeneration(
+        'subtitle_export_warning',
+        logContext,
+        { stage: 'export', videoSucceeded: true },
+        renderResult.subtitleExportError,
+        'warn',
+      )
       if (batch) batch.warningCount += 1
       const message = t('features.render.errors.subtitleExportFailed')
       const detail = `${renderResult.outputPath ?? ''}\n${renderResult.subtitleExportError}`
@@ -580,7 +675,6 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     appStore.updateRenderStatus(RenderStatus.Completed)
   } catch (error: any) {
     if (task.finished) return
-    console.error('视频合成失败:', error)
     finishTask('failed', error)
     if (
       batch &&
@@ -589,6 +683,13 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
     ) {
       batch.stopRequested = true
       batch.stopReason = 'unrecoverable_error'
+      logGeneration(
+        'batch_stop_requested',
+        logContext,
+        { reason: batch.stopReason, errorCode: classifyError(error) },
+        undefined,
+        'warn',
+      )
     }
     const errorMessage = error?.error?.message || error?.message || error
     toast.error({
@@ -609,6 +710,20 @@ const renderSingleVideo = async (batchContext?: BatchContext) => {
       },
     })
     appStore.updateRenderStatus(RenderStatus.Failed)
+  } finally {
+    if (!task.finished) {
+      logGeneration(
+        'task_interrupted',
+        logContext,
+        {
+          stage: task.stage,
+          renderStatus: appStore.renderStatus,
+          reason: 'returned_without_outcome',
+        },
+        undefined,
+        'warn',
+      )
+    }
   }
 }
 const handleCancelRender = () => {
@@ -616,7 +731,15 @@ const handleCancelRender = () => {
     appStore.batchProgress.stopRequested = true
     appStore.batchProgress.stopReason = 'user_cancelled'
   }
-  console.log('视频合成终止')
+  logGeneration(
+    'cancel_requested',
+    {
+      operationId: activeGeneration?.id,
+      batchId: appStore.batchProgress?.id,
+      item: appStore.batchProgress?.current,
+    },
+    { stage: activeGeneration?.stage ?? 'preflight' },
+  )
   const task = activeGeneration
   switch (appStore.renderStatus) {
     case RenderStatus.GenerateText:
@@ -628,6 +751,7 @@ const handleCancelRender = () => {
       break
 
     case RenderStatus.SegmentVideo:
+      task?.segmentController?.abort()
       break
 
     case RenderStatus.Rendering:

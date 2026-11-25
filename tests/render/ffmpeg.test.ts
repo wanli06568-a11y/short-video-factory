@@ -93,6 +93,7 @@ describe('FFmpeg execution and render inputs', () => {
       }),
     )
     expect(args[args.indexOf('-filter_complex') + 1]).toContain('overlay=')
+    expect(args[args.indexOf('-filter_complex') + 1]).toContain('pad=720:1280:')
     expect(args[args.indexOf('-filter_complex') + 1]).not.toContain('subtitles=')
 
     child.emit('close', 0)
@@ -100,6 +101,25 @@ describe('FFmpeg execution and render inputs', () => {
     for (const filePath of [videoPath, voicePath, bgmPath, subtitlePath]) {
       expect(fs.existsSync(filePath), `expected caller input to remain: ${filePath}`).toBe(true)
     }
+  })
+
+  it('scales proportionally and center-crops instead of padding in cover mode', async () => {
+    const child = createChildProcess()
+    const render = renderVideo({
+      videoFiles: ['scene.mp4'],
+      timeRanges: [['0', '1']],
+      subtitlesEnabled: false,
+      outputSize: { width: 720, height: 1280 },
+      videoFillMode: 'cover',
+      outputPath: path.join(tempDir, 'output.mp4'),
+    })
+    await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalledOnce())
+    const args = mocks.spawn.mock.calls[0][1] as string[]
+    const filters = args[args.indexOf('-filter_complex') + 1]
+    expect(filters).toContain("scale=w='max(720,ceil(1280*dar/2)*2)':h='max(1280,ceil(720/dar/2)*2)',crop=720:1280")
+    expect(filters).not.toContain('pad=')
+    child.emit('close', 0)
+    await expect(render).resolves.toMatchObject({ code: 0 })
   })
 
   it('removes generated voice and subtitle files when the render fails', async () => {
@@ -245,6 +265,25 @@ describe('FFmpeg execution and render inputs', () => {
     child.emit('close', 255)
     await expect(execution).rejects.toThrow('FFmpeg exited with code 255')
     expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+
+  it('preserves FFmpeg exit code, signal and stderr for diagnostics', async () => {
+    const child = createChildProcess()
+    const execution = executeFFmpeg(['-i', 'input.mp4', 'output.mp4'])
+    child.stderr.emit('data', Buffer.from('encoder failed'))
+    child.emit('close', 1, 'SIGTERM')
+    await expect(execution).rejects.toMatchObject({
+      code: 1,
+      signal: 'SIGTERM',
+      message: 'FFmpeg exited with code 1: encoder failed',
+    })
+  })
+
+  it('preserves the underlying startup error instead of only its message', async () => {
+    const child = createChildProcess()
+    const execution = executeFFmpeg(['-i', 'input.mp4', 'output.mp4'])
+    child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }))
+    await expect(execution).rejects.toMatchObject({ cause: { code: 'EACCES' } })
   })
 
   it('does not spawn FFmpeg for a signal that was already aborted', async () => {

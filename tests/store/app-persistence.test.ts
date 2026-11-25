@@ -15,8 +15,48 @@ const createPersistedStore = () => {
 }
 
 describe('app store persisted state', () => {
+  it('migrates legacy BGM folders and persists explicit disabled/fixed modes', async () => {
+    localStorage.setItem('app', JSON.stringify({ renderConfig: { bgmPath: '/music' } }))
+    const first = createPersistedStore()
+    expect(first.store.renderConfig.bgmMode).toBe('random')
+    first.store.updateRenderConfig({
+      ...first.store.renderConfig,
+      bgmMode: 'fixed',
+      bgmFile: '/music/fixed.wav',
+      subtitleStyle: { ...first.store.renderConfig.subtitleStyle, color: '#FF0000' },
+    })
+    await nextTick()
+    first.app.unmount()
+    const second = createPersistedStore()
+    expect(second.store.renderConfig.bgmMode).toBe('fixed')
+    expect(second.store.renderConfig.bgmFile).toBe('/music/fixed.wav')
+    expect(second.store.renderConfig.subtitleStyle.color).toBe('#FF0000')
+    second.store.updateRenderConfig({ ...second.store.renderConfig, bgmMode: 'none' })
+    await nextTick()
+    second.app.unmount()
+    const third = createPersistedStore()
+    expect(third.store.renderConfig.bgmMode).toBe('none')
+    expect(third.store.renderConfig.bgmPath).toBe('/music')
+    third.app.unmount()
+  })
+
   afterEach(() => {
     localStorage.clear()
+  })
+
+  it.each([
+    [undefined, 'standard'],
+    ['invalid', 'standard'],
+    ['long', 'long'],
+    ['whole', 'whole'],
+  ])('normalizes persisted segment mode %s to %s', (segmentMode, expected) => {
+    localStorage.setItem('app', JSON.stringify({ renderConfig: { segmentMode } }))
+    const { app, store } = createPersistedStore()
+    try {
+      expect(store.renderConfig.segmentMode).toBe(expected)
+    } finally {
+      app.unmount()
+    }
   })
 
   it('migrates legacy model settings and normalizes partial or invalid persisted data', async () => {
@@ -44,7 +84,7 @@ describe('app store persisted state', () => {
     const { app, store } = createPersistedStore()
     try {
       expect(store.llmConfig).toMatchObject({
-        protocol: 'openai-chat',
+        protocol: 'openai-compatible',
         apiUrl: 'https://example.com/v1',
         apiKey: 'legacy-key',
         modelName: 'legacy-model',
@@ -60,6 +100,8 @@ describe('app store persisted state', () => {
       })
       expect(store.renderConfig).toMatchObject({
         subtitlesEnabled: true,
+        segmentOrder: 'random',
+        videoFillMode: 'contain',
         exportSubtitles: false,
         outputPath: 'C:/render output',
         outputSize: { width: 1080, height: 1920 },
@@ -69,6 +111,44 @@ describe('app store persisted state', () => {
       expect(store.renderStatus).toBe(RenderStatus.None)
     } finally {
       app.unmount()
+    }
+  })
+
+  it('converts persisted OpenAI chat settings to compatible format across reloads', async () => {
+    localStorage.setItem(
+      'app',
+      JSON.stringify({
+        llmConfig: {
+          protocol: 'openai-chat',
+          apiUrl: 'https://example.com/v1',
+          apiKey: 'legacy-key',
+          modelName: 'legacy-model',
+          temperature: 0.5,
+          maxOutputTokens: 1000,
+          customHeaders: [{ name: 'X-Trace', value: 'trace' }],
+        },
+      }),
+    )
+
+    for (let session = 0; session < 2; session++) {
+      const { app, store } = createPersistedStore()
+      try {
+        expect(store.llmConfig).toMatchObject({
+          protocol: 'openai-compatible',
+          apiUrl: 'https://example.com/v1',
+          apiKey: 'legacy-key',
+          modelName: 'legacy-model',
+          temperature: 0.5,
+          maxOutputTokens: 1000,
+          customHeaders: [{ name: 'X-Trace', value: 'trace' }],
+        })
+        await nextTick()
+        expect(JSON.parse(localStorage.getItem('app') ?? '{}').llmConfig.protocol).toBe(
+          'openai-compatible',
+        )
+      } finally {
+        app.unmount()
+      }
     }
   })
 
@@ -96,6 +176,9 @@ describe('app store persisted state', () => {
       outputFileExt: '.mp4',
       subtitlesEnabled: false,
       exportSubtitles: true,
+      segmentMode: 'whole',
+      segmentOrder: 'filename',
+      videoFillMode: 'cover',
     })
     firstSession.store.language = 'English (United States)'
     firstSession.store.gender = 'Female'
@@ -134,6 +217,8 @@ describe('app store persisted state', () => {
       expect(secondSession.store.renderConfig.outputPath).toBe('C:/output folder')
       expect(secondSession.store.renderConfig.subtitlesEnabled).toBe(false)
       expect(secondSession.store.renderConfig.exportSubtitles).toBe(true)
+      expect(secondSession.store.renderConfig.segmentOrder).toBe('filename')
+      expect(secondSession.store.renderConfig.videoFillMode).toBe('cover')
       expect(secondSession.store.language).toBe('English (United States)')
       expect(secondSession.store.gender).toBe('Female')
       expect(secondSession.store.voice?.ShortName).toBe('en-US-Test')

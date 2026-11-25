@@ -10,6 +10,7 @@ export const defaultLlmConfig = (): LlmConfig => ({
   timeoutSeconds: 120,
   anthropicAuthMode: 'api-key',
   instructionDelivery: 'standard',
+  decodeLeadingThink: true,
   customHeaders: [],
 })
 
@@ -22,7 +23,6 @@ export const defaultCopywritingConfig = (): CopywritingConfig => ({
 
 const protocols = new Set<LlmConfig['protocol']>([
   'openai-compatible',
-  'openai-chat',
   'openai-responses',
   'anthropic-messages',
 ])
@@ -55,7 +55,6 @@ const isHeader = (value: unknown): value is CustomHeader => {
 export function normalizeLlmConfig(value: unknown): LlmConfig {
   const defaults = defaultLlmConfig()
   const config = value && typeof value === 'object' ? (value as Partial<LlmConfig>) : {}
-  const isLegacy = !('protocol' in config)
   const headers = Array.isArray(config.customHeaders) ? config.customHeaders.filter(isHeader) : []
   const usedNames = new Set<string>()
   const customHeaders = headers.reduce<CustomHeader[]>((result, header) => {
@@ -77,9 +76,7 @@ export function normalizeLlmConfig(value: unknown): LlmConfig {
     ...defaults,
     protocol: protocols.has(config.protocol as LlmConfig['protocol'])
       ? (config.protocol as LlmConfig['protocol'])
-      : isLegacy
-        ? 'openai-chat'
-        : defaults.protocol,
+      : defaults.protocol,
     apiUrl: typeof config.apiUrl === 'string' ? config.apiUrl.trim() : '',
     apiKey: typeof config.apiKey === 'string' ? config.apiKey : '',
     modelName: typeof config.modelName === 'string' ? config.modelName.trim() : '',
@@ -99,6 +96,7 @@ export function normalizeLlmConfig(value: unknown): LlmConfig {
     anthropicAuthMode: config.anthropicAuthMode === 'bearer' ? 'bearer' : 'api-key',
     instructionDelivery:
       config.instructionDelivery === 'user-message' ? 'user-message' : 'standard',
+    decodeLeadingThink: config.decodeLeadingThink !== false,
     customHeaders,
   }
 }

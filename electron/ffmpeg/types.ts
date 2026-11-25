@@ -6,7 +6,10 @@ export interface AudioVolumeConfig {
   targetLoudness?: string // 目标响度（LUFS），如 "-16"（YouTube推荐）或 "-14"（Spotify推荐）
 }
 
+export type VideoFillMode = 'contain' | 'cover'
+
 export interface RenderVideoParams {
+  diagnosticContext?: import('../../src/lib/generation-diagnostics').GenerationLogContext
   videoFiles: string[]
   timeRanges: [string, string][]
   audioFiles?: { voice?: string; bgm?: string }
@@ -17,6 +20,7 @@ export interface RenderVideoParams {
   subtitlesEnabled?: boolean
   exportSubtitles?: boolean
   outputSize: { width: number; height: number }
+  videoFillMode?: VideoFillMode
   outputPath: string
   outputDuration?: string
   audioVolume?: AudioVolumeConfig
