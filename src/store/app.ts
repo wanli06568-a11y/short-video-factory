@@ -8,6 +8,12 @@ import {
   normalizeLlmConfig,
 } from '@/lib/llm/config'
 import type { CopywritingStatus, LlmConfig } from '@/lib/llm/types'
+import {
+  LEGACY_PROVIDER_ID,
+  normalizeProviderProfile,
+  normalizeProviderProfiles,
+  type ProviderProfile,
+} from '@/lib/llm/provider-profiles'
 import { normalizeBatchConfig, type BatchRunState } from '@/lib/batch'
 import { normalizeSubtitleStyle, normalizeVideoFillMode, type BgmMode } from '@/lib/render-config'
 import { normalizeSegmentMode, normalizeSegmentOrder, type SegmentMode } from '@/lib/video-segments'
@@ -34,10 +40,74 @@ export const useAppStore = defineStore(
     // 大模型文案生成
     const prompt = ref('')
     const llmConfig = ref<LlmConfig>(defaultLlmConfig())
+    const providerProfiles = ref<ProviderProfile[]>([])
+    const activeProviderId = ref<string | null>(null)
     const copywritingConfig = ref(defaultCopywritingConfig())
     const copywritingStatus = ref<CopywritingStatus>('idle')
+    const selectProviderProfile = (id: string, modelName?: string) => {
+      const profile = providerProfiles.value.find((entry) => entry.id === id)
+      if (!profile || (modelName !== undefined && !profile.models.includes(modelName))) return
+      if (modelName !== undefined) profile.config.modelName = modelName
+      activeProviderId.value = profile.id
+      llmConfig.value = normalizeLlmConfig(profile.config)
+    }
+    const saveProviderProfile = (draft: ProviderProfile) => {
+      const profile = normalizeProviderProfile(draft)
+      const index = providerProfiles.value.findIndex((entry) => entry.id === profile.id)
+      if (index === -1) providerProfiles.value.push(profile)
+      else providerProfiles.value[index] = profile
+    }
+    const moveProviderProfile = (id: string, targetId: string, position: 'before' | 'after') => {
+      if (id === targetId) return
+      const profiles = providerProfiles.value
+      const from = profiles.findIndex((profile) => profile.id === id)
+      const target = profiles.findIndex((profile) => profile.id === targetId)
+      if (from < 0 || target < 0) return
+      const to = target + (position === 'after' ? 1 : 0) - (from < target ? 1 : 0)
+      if (from === to) return
+      const reordered = [...profiles]
+      const [profile] = reordered.splice(from, 1)
+      reordered.splice(to, 0, profile)
+      providerProfiles.value = reordered
+    }
+    const removeProviderProfile = (id: string) => {
+      providerProfiles.value = providerProfiles.value.filter((profile) => profile.id !== id)
+      if (activeProviderId.value !== id) return
+      activeProviderId.value = null
+      llmConfig.value = defaultLlmConfig()
+    }
     const updateLLMConfig = (newConfig: LlmConfig) => {
-      llmConfig.value = normalizeLlmConfig(newConfig)
+      const config = normalizeLlmConfig(newConfig)
+      const active = providerProfiles.value.find(({ id }) => id === activeProviderId.value)
+      if (active) {
+        saveProviderProfile({ ...active, config })
+        selectProviderProfile(active.id)
+      } else if (
+        config.apiUrl ||
+        config.apiKey ||
+        config.modelName ||
+        config.customHeaders.length
+      ) {
+        saveProviderProfile({ id: LEGACY_PROVIDER_ID, name: '', config, models: [] })
+        selectProviderProfile(LEGACY_PROVIDER_ID)
+      } else llmConfig.value = config
+    }
+    const hydrateProviderProfiles = () => {
+      const before = JSON.stringify([
+        providerProfiles.value,
+        activeProviderId.value,
+        llmConfig.value,
+      ])
+      providerProfiles.value = normalizeProviderProfiles(providerProfiles.value)
+      const active = providerProfiles.value.find(({ id }) => id === activeProviderId.value)
+      if (active) llmConfig.value = normalizeLlmConfig(llmConfig.value)
+      else {
+        activeProviderId.value = null
+        llmConfig.value = defaultLlmConfig()
+      }
+      return (
+        before !== JSON.stringify([providerProfiles.value, activeProviderId.value, llmConfig.value])
+      )
     }
     const updateCopywritingConfig = (newConfig: typeof copywritingConfig.value) => {
       copywritingConfig.value = normalizeCopywritingConfig(newConfig)
@@ -151,6 +221,13 @@ export const useAppStore = defineStore(
       prompt,
       llmConfig,
       updateLLMConfig,
+      providerProfiles,
+      activeProviderId,
+      saveProviderProfile,
+      moveProviderProfile,
+      selectProviderProfile,
+      removeProviderProfile,
+      hydrateProviderProfiles,
       copywritingConfig,
       updateCopywritingConfig,
       copywritingStatus,
@@ -192,6 +269,17 @@ export const useAppStore = defineStore(
           if (state?.renderConfig && !state.renderConfig.bgmMode) {
             state.renderConfig.bgmMode = state.renderConfig.bgmPath ? 'random' : 'none'
           }
+          if (state && !Array.isArray(state.providerProfiles)) {
+            state.providerProfiles = []
+            state.activeProviderId = null
+            const config = normalizeLlmConfig(state.llmConfig)
+            if (config.apiUrl || config.apiKey || config.modelName || config.customHeaders.length) {
+              state.providerProfiles = [
+                normalizeProviderProfile({ id: LEGACY_PROVIDER_ID, name: '', config, models: [] }),
+              ]
+              state.activeProviderId = LEGACY_PROVIDER_ID
+            }
+          }
           return state
         },
       },
@@ -204,13 +292,12 @@ export const useAppStore = defineStore(
         'copywritingStatus',
       ],
       afterHydrate: (context) => {
-        const persistedProtocol = context.store.llmConfig.protocol
         context.store.batchConfig = normalizeBatchConfig(context.store.batchConfig)
         context.store.updateRenderConfig(context.store.renderConfig)
-        context.store.updateLLMConfig(context.store.llmConfig)
+        const migratedProviders = context.store.hydrateProviderProfiles()
         context.store.updateCopywritingConfig(context.store.copywritingConfig)
-        // Hydration runs before persistence subscriptions, so save protocol migrations explicitly.
-        if (persistedProtocol !== context.store.llmConfig.protocol) context.store.$persist()
+        if (migratedProviders || context.store.activeProviderId === LEGACY_PROVIDER_ID)
+          context.store.$persist()
       },
     },
   },

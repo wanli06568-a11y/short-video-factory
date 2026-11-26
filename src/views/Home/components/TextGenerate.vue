@@ -31,7 +31,7 @@
           </v-btn>
           <v-dialog v-model="configDialogShow" max-width="680" persistent scrollable>
             <template #activator="{ props: activatorProps }">
-              <v-btn v-bind="activatorProps" :disabled="disabled">{{
+              <v-btn v-bind="activatorProps" :disabled="providerControlsDisabled">{{
                 t('common.buttons.config')
               }}</v-btn>
             </template>
@@ -47,75 +47,510 @@
                 density="comfortable"
                 fixed-tabs
               >
-                <v-tab value="connection">{{ t('features.llm.config.connectionTab') }}</v-tab>
+                <v-tab value="connection">{{ t('features.llm.config.myProviders') }}</v-tab>
                 <v-tab value="copywriting">{{ t('features.llm.config.copywritingTab') }}</v-tab>
-                <v-tab value="advanced">{{ t('features.llm.config.advancedTab') }}</v-tab>
               </v-tabs>
               <v-card-text :key="configTab" class="llm-config-body">
                 <v-window v-model="configTab">
                   <v-window-item value="connection" class="llm-config-panel">
                     <div class="llm-config-form flex flex-col gap-3">
-                      <v-select
-                        v-model="config.protocol"
-                        hide-details
-                        :label="t('features.llm.config.protocol')"
-                        :items="protocolItems"
-                      />
-                      <div>
-                        <v-text-field
-                          v-model="config.apiUrl"
-                          hide-details
-                          :label="t('features.llm.config.apiUrl')"
-                          required
-                          clearable
-                        />
-                        <div v-if="requestUrlHint" class="text-caption text-medium-emphasis mt-1">
-                          {{ t('features.llm.config.requestUrl') }}: {{ requestUrlHint }}
-                        </div>
-                        <div v-if="requestUrlIssue" class="text-caption text-error mt-1">
-                          {{
-                            t(
-                              requestUrlIssue === 'full-endpoint'
-                                ? 'features.llm.config.fullEndpointApiUrl'
-                                : 'features.llm.config.invalidApiUrl',
-                            )
-                          }}
+                      <div class="provider-profile-bar">
+                        <v-btn
+                          class="provider-profile-add"
+                          variant="tonal"
+                          prepend-icon="mdi-plus"
+                          @click="openProviderPicker"
+                        >
+                          {{ t('features.llm.config.addProvider') }}
+                        </v-btn>
+                      </div>
+                      <p v-if="!appStore.providerProfiles.length" class="provider-empty">
+                        {{ t('features.llm.config.noSavedProviders') }}
+                      </p>
+                      <div v-else class="saved-provider-grid" @dragleave="leaveProviderGrid">
+                        <div
+                          v-for="profile in appStore.providerProfiles"
+                          :key="profile.id"
+                          class="saved-provider-row"
+                          :class="{
+                            'saved-provider-row--sortable': canReorderProviders,
+                            'saved-provider-row--dragging': draggedProviderId === profile.id,
+                            'saved-provider-row--drop-before':
+                              providerDropTarget?.id === profile.id &&
+                              providerDropTarget.position === 'before',
+                            'saved-provider-row--drop-after':
+                              providerDropTarget?.id === profile.id &&
+                              providerDropTarget.position === 'after',
+                          }"
+                          @dragover="setProviderDropTarget($event, profile.id)"
+                          @drop="dropProvider($event, profile.id)"
+                        >
+                          <button
+                            v-if="canReorderProviders"
+                            class="saved-provider-drag-handle"
+                            type="button"
+                            draggable="true"
+                            :title="t('features.llm.config.reorderProviderHint')"
+                            :aria-label="
+                              t('features.llm.config.reorderProvider', {
+                                name: profileTitle(profile),
+                              })
+                            "
+                            aria-keyshortcuts="ArrowUp ArrowDown"
+                            @dragstart="startProviderDrag($event, profile.id)"
+                            @dragend="clearProviderDrag"
+                            @keydown.up.prevent="moveProviderWithKeyboard(profile.id, -1)"
+                            @keydown.down.prevent="moveProviderWithKeyboard(profile.id, 1)"
+                          >
+                            <v-icon icon="mdi-drag-vertical" size="20" aria-hidden="true" />
+                          </button>
+                          <button
+                            class="saved-provider-card"
+                            type="button"
+                            :aria-pressed="profile.id === selectedProfileId"
+                            @click="selectedProfileId = profile.id"
+                          >
+                            <span class="saved-provider-name">{{ profileTitle(profile) }}</span>
+                            <span v-if="profile.config.modelName" class="saved-provider-model">
+                              <span>{{ profile.config.modelName }}</span>
+                              <span v-if="isProfileInUse(profile)" class="saved-provider-active">{{
+                                t('features.llm.config.activeProvider')
+                              }}</span>
+                            </span>
+                          </button>
+                          <div class="saved-provider-actions">
+                            <v-btn
+                              size="small"
+                              variant="text"
+                              icon="mdi-pulse"
+                              :loading="testingProfileId === profile.id"
+                              :disabled="!!testAbortController"
+                              :title="profileTestLabel(profile.id)"
+                              :aria-label="profileTestLabel(profile.id)"
+                              @click="testSavedProfile(profile)"
+                            />
+                            <span class="saved-provider-test-status" role="status">
+                              <span
+                                v-if="profileTestStatus.get(profile.id)?.status === 'success'"
+                                class="text-success"
+                                >{{ t('features.llm.config.providerTestPassed') }}</span
+                              >
+                              <span
+                                v-else-if="profileTestStatus.get(profile.id)?.status === 'error'"
+                                class="text-error"
+                                >{{ t('features.llm.config.providerTestFailed') }}</span
+                              >
+                            </span>
+                            <v-btn
+                              size="small"
+                              variant="text"
+                              icon="mdi-pencil-outline"
+                              :title="t('features.llm.config.editProvider')"
+                              :aria-label="t('features.llm.config.editProvider')"
+                              @click="editProvider(profile.id)"
+                            />
+                            <v-btn
+                              size="small"
+                              variant="text"
+                              icon="mdi-delete-outline"
+                              :title="t('features.llm.config.deleteProvider')"
+                              :aria-label="t('features.llm.config.deleteProvider')"
+                              @click="deleteProvider(profile.id)"
+                            />
+                          </div>
                         </div>
                       </div>
-                      <v-text-field
-                        v-model="config.apiKey"
-                        hide-details
-                        :label="t('features.llm.config.apiKey')"
-                        :type="showApiKey ? 'text' : 'password'"
-                        :append-inner-icon="showApiKey ? 'mdi-eye-off' : 'mdi-eye'"
-                        clearable
-                        @click:append-inner="showApiKey = !showApiKey"
-                      />
-                      <v-select
-                        v-if="config.protocol === 'anthropic-messages'"
-                        v-model="config.anthropicAuthMode"
-                        hide-details
-                        :label="t('features.llm.config.anthropicAuthMode')"
-                        :items="authItems"
-                      />
-                      <v-text-field
-                        v-model="config.modelName"
-                        hide-details
-                        :label="t('features.llm.config.modelName')"
-                        required
-                        clearable
-                      />
-                      <v-alert
-                        v-if="testResult"
-                        :type="testResult === 'success' ? 'success' : 'error'"
-                        density="compact"
-                        >{{
-                          testResult === 'success'
-                            ? t('features.llm.success.connectionSucceeded')
-                            : t('features.llm.errors.connectionFailed')
-                        }}</v-alert
-                      >
                     </div>
+                    <v-dialog
+                      :model-value="providerPage !== 'list'"
+                      max-width="620"
+                      persistent
+                      scrollable
+                    >
+                      <v-card class="llm-config-card provider-dialog-card">
+                        <div class="provider-page-heading">
+                          <v-btn
+                            v-if="providerPage === 'editor' && !editingProviderId"
+                            icon="mdi-arrow-left"
+                            size="small"
+                            variant="text"
+                            :aria-label="t('features.llm.config.backToProviderPicker')"
+                            @click="backToProviderPicker"
+                          />
+                          <v-card-title>
+                            {{
+                              providerPage === 'choose'
+                                ? t('features.llm.config.selectProviderTitle')
+                                : editorTitle
+                            }}
+                          </v-card-title>
+                        </div>
+                        <ProviderPicker
+                          v-if="providerPage === 'choose'"
+                          v-model:query="providerQuery"
+                          v-model:scroll-top="providerScrollTop"
+                          :groups="providerGroups"
+                          @select="selectProvider"
+                        />
+                        <template v-else-if="providerPage === 'editor'">
+                          <v-card-text class="llm-config-body">
+                            <div class="llm-config-panel llm-config-form flex flex-col gap-3">
+                              <v-text-field
+                                v-model="profileName"
+                                :label="t('features.llm.config.providerName')"
+                                :placeholder="defaultProfileName(config, editingProviderId)"
+                                hide-details
+                              />
+                              <v-alert
+                                v-if="
+                                  selectedProvider &&
+                                  providerGroups.partners.includes(selectedProvider)
+                                "
+                                density="compact"
+                                variant="tonal"
+                                type="info"
+                              >
+                                {{ t('features.llm.config.partnerPreview') }}
+                              </v-alert>
+                              <v-text-field
+                                v-model="config.apiKey"
+                                hide-details
+                                :label="t('features.llm.config.apiKey')"
+                                :type="showApiKey ? 'text' : 'password'"
+                                :append-inner-icon="showApiKey ? 'mdi-eye-off' : 'mdi-eye'"
+                                clearable
+                                @click:append-inner="showApiKey = !showApiKey"
+                              />
+                              <v-btn
+                                v-if="selectedProvider?.keysUrl"
+                                class="self-start"
+                                size="small"
+                                variant="text"
+                                append-icon="mdi-open-in-new"
+                                @click="openProviderLink(selectedProvider.keysUrl)"
+                              >
+                                {{ t('features.llm.config.getApiKey') }}
+                              </v-btn>
+                              <div class="provider-profile-bar provider-model-heading">
+                                <h4>{{ t('features.llm.config.providerModelList') }}</h4>
+                                <v-btn
+                                  size="small"
+                                  variant="tonal"
+                                  prepend-icon="mdi-plus"
+                                  :aria-expanded="modelEditorOpen"
+                                  @click="modelEditorOpen = !modelEditorOpen"
+                                  >{{ t('features.llm.config.addModel') }}</v-btn
+                                >
+                              </div>
+                              <div v-if="draftModels.length" class="flex flex-wrap gap-2">
+                                <v-chip
+                                  v-for="model in draftModels"
+                                  :key="model"
+                                  size="small"
+                                  closable
+                                  :aria-pressed="config.modelName === model"
+                                  :prepend-icon="
+                                    config.modelName === model
+                                      ? 'mdi-radiobox-marked'
+                                      : 'mdi-radiobox-blank'
+                                  "
+                                  :color="config.modelName === model ? 'primary' : undefined"
+                                  @click="config.modelName = model"
+                                  @click:close="removeModel(model)"
+                                  >{{ model
+                                  }}{{
+                                    isOfficialFreeModel(model)
+                                      ? ` · ${t('features.llm.config.officialFree')}`
+                                      : ''
+                                  }}</v-chip
+                                >
+                              </div>
+                              <div
+                                v-if="modelEditorOpen"
+                                class="llm-config-form flex flex-col gap-3"
+                              >
+                                <v-text-field
+                                  v-model="manualModelId"
+                                  hide-details
+                                  :label="t('features.llm.config.modelName')"
+                                  clearable
+                                  @keydown.enter.prevent="addCurrentModel"
+                                />
+                                <div class="flex flex-wrap gap-2">
+                                  <v-btn
+                                    size="small"
+                                    variant="tonal"
+                                    :disabled="!manualModelId?.trim()"
+                                    @click="addCurrentModel"
+                                  >
+                                    {{ t('features.llm.config.addModelId') }}
+                                  </v-btn>
+                                  <v-btn
+                                    size="small"
+                                    variant="text"
+                                    :loading="catalogLoading"
+                                    :disabled="!config.apiUrl?.trim()"
+                                    @click="loadModels"
+                                  >
+                                    {{ t('features.llm.config.fetchModels') }}
+                                  </v-btn>
+                                </div>
+                                <v-alert
+                                  v-if="catalogMessage"
+                                  type="info"
+                                  density="compact"
+                                  variant="tonal"
+                                  >{{ catalogMessage }}</v-alert
+                                >
+                                <v-autocomplete
+                                  v-if="availableModels.length"
+                                  :model-value="null"
+                                  :label="t('features.llm.config.chooseModel')"
+                                  :items="availableModels"
+                                  hide-details
+                                  @update:model-value="addModel"
+                                >
+                                  <template #item="{ props: itemProps, item }">
+                                    <v-list-item
+                                      v-bind="itemProps"
+                                      :subtitle="
+                                        isOfficialFreeModel(item.title)
+                                          ? t('features.llm.config.officialFree')
+                                          : undefined
+                                      "
+                                    />
+                                  </template>
+                                </v-autocomplete>
+                                <v-btn
+                                  v-if="selectedProvider?.modelsUrl"
+                                  class="self-start"
+                                  size="small"
+                                  variant="text"
+                                  append-icon="mdi-open-in-new"
+                                  @click="openProviderLink(selectedProvider.modelsUrl)"
+                                >
+                                  {{ t('features.llm.config.providerModels') }}
+                                </v-btn>
+                              </div>
+                              <v-alert
+                                v-if="testResult"
+                                :type="testResult === 'success' ? 'success' : 'error'"
+                                density="compact"
+                                >{{
+                                  testResult === 'success'
+                                    ? t('features.llm.success.connectionSucceeded')
+                                    : t('features.llm.errors.connectionFailed')
+                                }}</v-alert
+                              >
+                              <v-divider />
+                              <v-btn
+                                class="self-start"
+                                variant="text"
+                                :aria-expanded="advancedOpen"
+                                :prepend-icon="
+                                  advancedOpen ? 'mdi-chevron-down' : 'mdi-chevron-right'
+                                "
+                                @click="advancedOpen = !advancedOpen"
+                                >{{ t('features.llm.config.advancedConnection') }}</v-btn
+                              >
+                              <div v-if="advancedOpen" class="llm-config-form flex flex-col gap-3">
+                                <v-select
+                                  v-model="config.protocol"
+                                  hide-details
+                                  :label="t('features.llm.config.protocol')"
+                                  :items="protocolItems"
+                                />
+                                <div>
+                                  <v-text-field
+                                    v-model="config.apiUrl"
+                                    hide-details
+                                    :label="t('features.llm.config.apiUrl')"
+                                    required
+                                    clearable
+                                  />
+                                  <div
+                                    v-if="requestUrlHint"
+                                    class="text-caption text-medium-emphasis mt-1"
+                                  >
+                                    {{ t('features.llm.config.requestUrl') }}: {{ requestUrlHint }}
+                                  </div>
+                                  <div v-if="requestUrlIssue" class="text-caption text-error mt-1">
+                                    {{
+                                      t(
+                                        requestUrlIssue === 'full-endpoint'
+                                          ? 'features.llm.config.fullEndpointApiUrl'
+                                          : 'features.llm.config.invalidApiUrl',
+                                      )
+                                    }}
+                                  </div>
+                                </div>
+                                <v-select
+                                  v-if="config.protocol === 'anthropic-messages'"
+                                  v-model="config.anthropicAuthMode"
+                                  hide-details
+                                  :label="t('features.llm.config.anthropicAuthMode')"
+                                  :items="authItems"
+                                />
+                                <v-select
+                                  v-model="config.instructionDelivery"
+                                  hide-details
+                                  :label="t('features.llm.config.instructionDelivery')"
+                                  :items="deliveryItems"
+                                />
+                                <v-switch
+                                  v-model="thinkingTagMode"
+                                  color="primary"
+                                  density="compact"
+                                  :label="t('features.llm.config.decodeLeadingThink')"
+                                  :hint="t('features.llm.config.decodeLeadingThinkHint')"
+                                  persistent-hint
+                                />
+                                <div class="llm-config-grid">
+                                  <v-text-field
+                                    v-model.number="config.timeoutSeconds"
+                                    type="number"
+                                    min="1"
+                                    hide-details
+                                    :label="t('features.llm.config.timeoutSeconds')"
+                                  />
+                                  <v-text-field
+                                    v-model.number="config.maxOutputTokens"
+                                    type="number"
+                                    min="1"
+                                    clearable
+                                    hide-details
+                                    :label="t('features.llm.config.maxOutputTokens')"
+                                  />
+                                </div>
+                                <div class="text-subtitle-2">
+                                  {{ t('features.llm.config.sampling') }}
+                                </div>
+                                <div class="llm-config-grid">
+                                  <v-text-field
+                                    v-model.number="config.temperature"
+                                    type="number"
+                                    min="0"
+                                    max="2"
+                                    step="0.1"
+                                    clearable
+                                    hide-details
+                                    :label="t('features.llm.config.temperature')"
+                                  />
+                                  <v-text-field
+                                    v-model.number="config.topP"
+                                    type="number"
+                                    min="0"
+                                    max="1"
+                                    step="0.05"
+                                    clearable
+                                    hide-details
+                                    :label="t('features.llm.config.topP')"
+                                  />
+                                </div>
+                                <div class="text-caption text-medium-emphasis">
+                                  {{ t('features.llm.config.samplingDescription') }}
+                                </div>
+                                <v-alert type="info" density="compact" variant="tonal">
+                                  {{ t('features.llm.config.samplingCompatibilityUnknown') }}
+                                </v-alert>
+                                <div class="flex justify-end">
+                                  <v-btn size="small" variant="text" @click="resetSamplingSettings">
+                                    {{ t('features.llm.config.restoreSamplingDefaults') }}
+                                  </v-btn>
+                                </div>
+                                <div class="text-subtitle-2 mb-2">
+                                  {{ t('features.llm.config.customHeaders') }}
+                                </div>
+                                <div
+                                  v-for="(header, index) in config.customHeaders"
+                                  :key="index"
+                                  class="llm-header-row"
+                                >
+                                  <v-text-field
+                                    v-model="header.name"
+                                    :label="t('features.llm.config.headerName')"
+                                  />
+                                  <v-text-field
+                                    v-model="header.value"
+                                    :label="t('features.llm.config.headerValue')"
+                                    type="password"
+                                  />
+                                  <v-btn
+                                    class="llm-header-remove"
+                                    icon="mdi-delete-outline"
+                                    size="small"
+                                    variant="text"
+                                    :title="t('common.buttons.remove')"
+                                    @click="removeHeader(index)"
+                                  />
+                                </div>
+                                <v-btn
+                                  size="small"
+                                  variant="text"
+                                  prepend-icon="mdi-plus"
+                                  @click="addHeader"
+                                  >{{ t('common.buttons.add') }}</v-btn
+                                >
+                                <div v-if="customHeaderIssue" class="text-caption text-error">
+                                  {{
+                                    t(
+                                      customHeaderIssue === 'invalid-name'
+                                        ? 'features.llm.config.invalidHeaderName'
+                                        : customHeaderIssue === 'invalid-value'
+                                          ? 'features.llm.config.invalidHeaderValue'
+                                          : customHeaderIssue === 'protected-name'
+                                            ? 'features.llm.config.protectedHeaderName'
+                                            : 'features.llm.config.duplicateHeaderName',
+                                    )
+                                  }}
+                                </div>
+                              </div>
+                            </div>
+                          </v-card-text>
+                        </template>
+                        <v-divider />
+                        <v-card-actions>
+                          <v-btn
+                            v-if="providerPage === 'editor'"
+                            variant="tonal"
+                            color="success"
+                            @click="handleTestConnection()"
+                          >
+                            <v-progress-circular
+                              v-if="testLoading"
+                              class="mr-2"
+                              indeterminate
+                              size="16"
+                              width="2"
+                            />
+                            {{
+                              testAbortController
+                                ? t('common.buttons.stop')
+                                : t('common.buttons.test')
+                            }}
+                          </v-btn>
+                          <v-spacer />
+                          <v-btn
+                            :text="t('common.buttons.cancel')"
+                            variant="plain"
+                            @click="returnToProviders"
+                          />
+                          <v-btn
+                            v-if="providerPage === 'editor'"
+                            color="primary"
+                            variant="tonal"
+                            :text="
+                              t(
+                                editingProviderId
+                                  ? 'features.llm.config.saveProviderChanges'
+                                  : 'features.llm.config.createProvider',
+                              )
+                            "
+                            @click="handleSaveConfig"
+                          />
+                        </v-card-actions>
+                      </v-card>
+                    </v-dialog>
                   </v-window-item>
                   <v-window-item value="copywriting" class="llm-config-panel">
                     <div class="llm-config-form flex flex-col gap-3">
@@ -171,167 +606,66 @@
                           {{ t('features.llm.config.rewriteDescription') }}
                         </div>
                         <div class="flex items-center justify-between">
-                          <span class="text-caption text-medium-emphasis">
-                            {{
-                              t('features.llm.config.historyCount', {
-                                count: historyTaskCount,
-                              })
-                            }}
-                          </span>
+                          <span class="text-caption text-medium-emphasis">{{
+                            t('features.llm.config.historyCount', { count: historyTaskCount })
+                          }}</span>
                           <v-btn
                             size="small"
                             variant="text"
                             :disabled="historyTaskCount === 0"
                             @click="handleClearHistory"
+                            >{{ t('features.llm.config.clearHistory') }}</v-btn
                           >
-                            {{ t('features.llm.config.clearHistory') }}
-                          </v-btn>
                         </div>
                       </template>
-                    </div>
-                  </v-window-item>
-                  <v-window-item value="advanced" class="llm-config-panel">
-                    <div class="llm-config-form flex flex-col gap-3">
-                      <v-select
-                        v-model="config.instructionDelivery"
-                        hide-details
-                        :label="t('features.llm.config.instructionDelivery')"
-                        :items="deliveryItems"
-                      />
-                      <v-switch
-                        v-model="thinkingTagMode"
-                        color="primary"
-                        density="compact"
-                        :label="t('features.llm.config.decodeLeadingThink')"
-                        :hint="t('features.llm.config.decodeLeadingThinkHint')"
-                        persistent-hint
-                      />
-                      <div class="llm-config-grid">
-                        <v-text-field
-                          v-model.number="config.timeoutSeconds"
-                          type="number"
-                          min="1"
-                          hide-details
-                          :label="t('features.llm.config.timeoutSeconds')"
-                        />
-                        <v-text-field
-                          v-model.number="config.maxOutputTokens"
-                          type="number"
-                          min="1"
-                          clearable
-                          hide-details
-                          :label="t('features.llm.config.maxOutputTokens')"
-                        />
-                      </div>
-                      <div class="text-subtitle-2">
-                        {{ t('features.llm.config.sampling') }}
-                      </div>
-                      <div class="llm-config-grid">
-                        <v-text-field
-                          v-model.number="config.temperature"
-                          type="number"
-                          min="0"
-                          max="2"
-                          step="0.1"
-                          clearable
-                          hide-details
-                          :label="t('features.llm.config.temperature')"
-                        />
-                        <v-text-field
-                          v-model.number="config.topP"
-                          type="number"
-                          min="0"
-                          max="1"
-                          step="0.05"
-                          clearable
-                          hide-details
-                          :label="t('features.llm.config.topP')"
-                        />
-                      </div>
-                      <div class="text-caption text-medium-emphasis">
-                        {{ t('features.llm.config.samplingDescription') }}
-                      </div>
-                      <v-alert type="info" density="compact" variant="tonal">
-                        {{ t('features.llm.config.samplingCompatibilityUnknown') }}
-                      </v-alert>
-                      <div class="flex justify-end">
-                        <v-btn size="small" variant="text" @click="resetSamplingSettings">
-                          {{ t('features.llm.config.restoreSamplingDefaults') }}
-                        </v-btn>
-                      </div>
-                      <div class="text-subtitle-2 mb-2">
-                        {{ t('features.llm.config.customHeaders') }}
-                      </div>
-                      <div
-                        v-for="(header, index) in config.customHeaders"
-                        :key="index"
-                        class="llm-header-row"
-                      >
-                        <v-text-field
-                          v-model="header.name"
-                          :label="t('features.llm.config.headerName')"
-                        />
-                        <v-text-field
-                          v-model="header.value"
-                          :label="t('features.llm.config.headerValue')"
-                          type="password"
-                        />
-                        <v-btn
-                          class="llm-header-remove"
-                          icon="mdi-delete-outline"
-                          size="small"
-                          variant="text"
-                          :title="t('common.buttons.remove')"
-                          @click="removeHeader(index)"
-                        />
-                      </div>
-                      <v-btn
-                        size="small"
-                        variant="text"
-                        prepend-icon="mdi-plus"
-                        @click="addHeader"
-                        >{{ t('common.buttons.add') }}</v-btn
-                      >
-                      <div v-if="customHeaderIssue" class="text-caption text-error">
-                        {{
-                          t(
-                            customHeaderIssue === 'invalid-name'
-                              ? 'features.llm.config.invalidHeaderName'
-                              : customHeaderIssue === 'invalid-value'
-                                ? 'features.llm.config.invalidHeaderValue'
-                                : customHeaderIssue === 'protected-name'
-                                  ? 'features.llm.config.protectedHeaderName'
-                                  : 'features.llm.config.duplicateHeaderName',
-                          )
-                        }}
-                      </div>
                     </div>
                   </v-window-item>
                 </v-window>
               </v-card-text>
               <v-divider />
               <v-card-actions>
-                <v-btn variant="tonal" color="success" @click="handleTestConnection">
-                  <v-progress-circular
-                    v-if="testLoading"
-                    class="mr-2"
-                    indeterminate
-                    size="16"
-                    width="2"
-                  />
-                  {{ testAbortController ? t('common.buttons.stop') : t('common.buttons.test') }}
-                </v-btn>
+                <span v-if="configTab === 'connection'" class="provider-footer-status">
+                  <template v-if="activeProfile">
+                    {{ t('features.llm.config.currentModel') }}
+                    <strong
+                      >{{ profileTitle(activeProfile) }} /
+                      {{ appStore.llmConfig.modelName }}</strong
+                    >
+                  </template>
+                  <template v-else>{{ t('features.llm.config.noActiveModel') }}</template>
+                </span>
                 <v-spacer />
                 <v-btn
-                  :text="t('common.buttons.cancel')"
+                  v-if="configTab === 'copywriting' || needsActivation"
+                  :text="
+                    t(
+                      configTab === 'copywriting'
+                        ? 'common.buttons.cancel'
+                        : 'common.buttons.close',
+                    )
+                  "
                   variant="plain"
                   @click="handleCloseDialog"
                 />
                 <v-btn
+                  v-if="configTab === 'copywriting'"
                   color="primary"
                   :text="t('common.buttons.save')"
                   variant="tonal"
                   @click="handleSaveConfig"
+                />
+                <v-btn
+                  v-else
+                  color="primary"
+                  :text="
+                    t(
+                      needsActivation
+                        ? 'features.llm.config.useProvider'
+                        : 'features.llm.config.finishProviders',
+                    )
+                  "
+                  variant="tonal"
+                  @click="applySelectedProfile"
                 />
               </v-card-actions>
             </v-card>
@@ -396,11 +730,24 @@ import { useTranslation } from 'i18next-vue'
 import { useToast } from 'vue-toastification'
 import ActionToastEmbed from '@/components/ActionToastEmbed.vue'
 import DurationEstimate from './DurationEstimate.vue'
+import ProviderPicker from './ProviderPicker.vue'
 import { copyErrorToClipboard } from '@/lib/error-copy'
-import { getCustomHeaderIssue, getLlmConfigIssue, normalizeLlmConfig } from '@/lib/llm/config'
+import {
+  defaultLlmConfig,
+  getCustomHeaderIssue,
+  getLlmConfigIssue,
+  normalizeLlmConfig,
+} from '@/lib/llm/config'
 import { generateCopywriting } from '@/lib/llm/generate'
 import { generateDiverseCopywriting, type GenerationPhase } from '@/lib/llm/generate-diverse'
 import { builtinSystemPrompt } from '@/lib/llm/prompts'
+import { applyProviderPreset, getProviderGroups, matchesProvider } from '@/lib/llm/provider-presets'
+import {
+  LEGACY_PROVIDER_ID,
+  normalizeModelIds,
+  type ProviderProfile,
+} from '@/lib/llm/provider-profiles'
+import { discoverProviderModels } from '@/lib/llm/model-discovery'
 import { getRequestUrlHint, getRequestUrlIssue } from '@/lib/llm/providers'
 import { getErrorDetail } from '@/lib/llm/security'
 import type { LlmConfig, LlmConfigIssue } from '@/lib/llm/types'
@@ -412,12 +759,12 @@ import { useAppStore } from '@/store'
 import type { GenerationUsageSummary } from '~/electron/analytics-types'
 import { createAnalyticsOperationId, trackAnalytics } from '@/lib/analytics'
 
-type ConfigTab = 'connection' | 'copywriting' | 'advanced'
+type ConfigTab = 'connection' | 'copywriting'
 
 const toast = useToast()
 const appStore = useAppStore()
-const { t } = useTranslation()
-defineProps<{ disabled?: boolean }>()
+const { i18next, t } = useTranslation()
+const props = defineProps<{ disabled?: boolean }>()
 
 const outputText = ref('')
 const unclosedThinkingOutput = ref('')
@@ -425,6 +772,21 @@ const abortController = ref<AbortController | null>(null)
 const testAbortController = ref<AbortController | null>(null)
 const configDialogShow = ref(false)
 const config = ref<LlmConfig>(structuredClone(toRaw(appStore.llmConfig)))
+const providerPage = ref<'list' | 'choose' | 'editor'>('list')
+const providerQuery = ref('')
+const providerScrollTop = ref(0)
+const selectedProfileId = ref<string | null>(appStore.activeProviderId)
+const editingProviderId = ref<string | null>(null)
+const advancedOpen = ref(false)
+const modelEditorOpen = ref(false)
+const manualModelId = ref<string | null>('')
+const profileName = ref('')
+const draftModels = ref<string[]>([])
+const catalogModels = ref<string[]>([])
+const catalogController = ref<AbortController>()
+const catalogMessage = ref('')
+const catalogLoading = computed(() => !!catalogController.value)
+const providerControlsDisabled = computed(() => props.disabled || !!appStore.batchProgress?.running)
 const copyConfig = ref(structuredClone(toRaw(appStore.copywritingConfig)))
 const customPromptField = ref<{ focus: () => void } | null>(null)
 const promptModeMenuOpen = ref(false)
@@ -438,12 +800,15 @@ const latestGenerationAnalytics = ref<GenerationUsageSummary>({
 })
 const testLoading = ref(false)
 const testResult = ref<'success' | 'error'>()
+const profileTestStatus = ref(new Map<string, { status: 'success' | 'error' }>())
+const testingProfileId = ref<string | null>(null)
 const configTab = ref<ConfigTab>('connection')
 const requestId = ref(0)
 const testRequestId = ref(0)
 const generationPhase = ref<GenerationPhase | null>(null)
 const historyRevision = ref(0)
 let configDialogRevision = 0
+let configResetPending = false
 const protocolItems = computed(() => [
   { title: t('features.llm.config.protocolCompatible'), value: 'openai-compatible' },
   { title: t('features.llm.config.protocolResponses'), value: 'openai-responses' },
@@ -473,6 +838,241 @@ const requestUrlHint = computed(() => getRequestUrlHint(normalizedConfig.value))
 const requestUrlIssue = computed(() =>
   normalizedConfig.value.apiUrl ? getRequestUrlIssue(normalizedConfig.value) : undefined,
 )
+const providerGroups = getProviderGroups(import.meta.env.VITE_PROVIDER_PARTNER_DEMO === 'true')
+const availableProviders = [...providerGroups.partners, ...providerGroups.common]
+const selectedProfile = computed(() =>
+  appStore.providerProfiles.find(({ id }) => id === selectedProfileId.value),
+)
+const activeProfile = computed(() =>
+  appStore.providerProfiles.find(({ id }) => id === appStore.activeProviderId),
+)
+const sameConfig = (a: LlmConfig, b: LlmConfig) =>
+  JSON.stringify(normalizeLlmConfig(a)) === JSON.stringify(normalizeLlmConfig(b))
+const isProfileInUse = (profile: ProviderProfile) =>
+  profile.id === appStore.activeProviderId && sameConfig(profile.config, appStore.llmConfig)
+const needsActivation = computed(
+  () => !!selectedProfile.value && !isProfileInUse(selectedProfile.value),
+)
+const applySelectedProfile = () => {
+  if (providerControlsDisabled.value) return
+  if (selectedProfile.value && needsActivation.value)
+    appStore.selectProviderProfile(selectedProfile.value.id)
+  handleCloseDialog()
+}
+const defaultProfileName = (value: LlmConfig, id?: string | null) => {
+  const preset = availableProviders.find((entry) => matchesProvider(value, entry))
+  if (preset) {
+    const preferChinese = (i18next?.resolvedLanguage ?? 'zh-CN').startsWith('zh')
+    return (preferChinese && preset.nameZh) || preset.name
+  }
+  if (id === LEGACY_PROVIDER_ID) return t('features.llm.config.defaultProviderName')
+  try {
+    return new URL(value.apiUrl).host
+  } catch {
+    return t('features.llm.config.customProvider')
+  }
+}
+const profileTitle = (profile: ProviderProfile) =>
+  profile.name || defaultProfileName(profile.config, profile.id)
+const editorTitle = computed(() => {
+  const profile = appStore.providerProfiles.find(({ id }) => id === editingProviderId.value)
+  return t(
+    profile ? 'features.llm.config.editProviderTitle' : 'features.llm.config.newProviderTitle',
+    {
+      name: profile ? profileTitle(profile) : defaultProfileName(config.value),
+    },
+  )
+})
+const selectedProvider = computed(() =>
+  availableProviders.find((preset) => matchesProvider(config.value, preset)),
+)
+const isOfficialFreeModel = (model: string) =>
+  selectedProvider.value?.id === 'zhipu' &&
+  (selectedProvider.value.suggestedModels?.includes(model.toLowerCase()) ?? false)
+const availableModels = computed(() =>
+  normalizeModelIds([
+    selectedProvider.value?.modelName,
+    ...(selectedProvider.value?.suggestedModels ?? []),
+    ...catalogModels.value,
+  ]).filter((model) => !draftModels.value.includes(model)),
+)
+const addModel = (model: string | null) => {
+  if (!model?.trim()) return
+  config.value.modelName = model.trim()
+  draftModels.value = normalizeModelIds([...draftModels.value, model])
+}
+const addCurrentModel = (event?: KeyboardEvent) => {
+  if (event?.isComposing) return
+  addModel(manualModelId.value)
+  manualModelId.value = ''
+}
+const removeModel = (model: string) => {
+  draftModels.value = draftModels.value.filter((entry) => entry !== model)
+  if (config.value.modelName === model) config.value.modelName = draftModels.value[0] ?? ''
+}
+const clearCatalog = () => {
+  catalogController.value?.abort()
+  catalogController.value = undefined
+  catalogModels.value = []
+  catalogMessage.value = ''
+}
+const loadModels = async () => {
+  clearCatalog()
+  const controller = new AbortController()
+  catalogController.value = controller
+  const timeout = setTimeout(() => controller.abort(), 15000)
+  try {
+    const models = await discoverProviderModels(config.value, controller.signal)
+    if (catalogController.value !== controller) return
+    catalogModels.value = models
+    if (!models.length) catalogMessage.value = t('features.llm.config.noProviderModels')
+  } catch {
+    if (catalogController.value === controller)
+      catalogMessage.value = t('features.llm.config.modelCatalogFailed')
+  } finally {
+    clearTimeout(timeout)
+    if (catalogController.value === controller) catalogController.value = undefined
+  }
+}
+watch(
+  () => [
+    config.value.apiUrl,
+    config.value.apiKey,
+    config.value.protocol,
+    config.value.anthropicAuthMode,
+    config.value.customHeaders,
+  ],
+  clearCatalog,
+  { deep: true, flush: 'sync' },
+)
+const editProvider = (id: string) => {
+  const profile = appStore.providerProfiles.find((entry) => entry.id === id)
+  if (!profile) return
+  cancelTestConnection()
+  selectedProfileId.value = id
+  editingProviderId.value = profile.id
+  profileName.value = profile.name
+  draftModels.value = [...profile.models]
+  manualModelId.value = ''
+  config.value = structuredClone(toRaw(profile.config))
+  advancedOpen.value = !selectedProvider.value
+  modelEditorOpen.value = !draftModels.value.length
+  clearCatalog()
+  showApiKey.value = false
+  providerPage.value = 'editor'
+}
+const deleteProvider = (id: string) => {
+  if (!window.confirm(t('features.llm.config.deleteProviderConfirm'))) return
+  appStore.removeProviderProfile(id)
+  if (testingProfileId.value === id) cancelTestConnection()
+  profileTestStatus.value.delete(id)
+  if (selectedProfileId.value === id)
+    selectedProfileId.value = appStore.activeProviderId ?? appStore.providerProfiles[0]?.id ?? null
+}
+const profileTestLabel = (id: string) => {
+  const status = profileTestStatus.value.get(id)?.status
+  if (testingProfileId.value === id) return t('features.llm.config.testingProvider')
+  if (status === 'success') return t('features.llm.config.retestPassed')
+  if (status === 'error') return t('features.llm.config.retestFailed')
+  return t('common.buttons.test')
+}
+const testSavedProfile = (profile: ProviderProfile) => {
+  if (testAbortController.value) return
+  profileTestStatus.value.delete(profile.id)
+  void handleTestConnection(profile)
+}
+const canReorderProviders = computed(() => appStore.providerProfiles.length > 1)
+const draggedProviderId = ref<string | null>(null)
+const providerDropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null)
+const clearProviderDrag = () => {
+  draggedProviderId.value = null
+  providerDropTarget.value = null
+}
+const startProviderDrag = (event: DragEvent, id: string) => {
+  if (!event.dataTransfer) return
+  draggedProviderId.value = id
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', '')
+  const row = (event.currentTarget as HTMLElement).closest('.saved-provider-row')
+  if (row) {
+    const bounds = row.getBoundingClientRect()
+    event.dataTransfer.setDragImage(row, event.clientX - bounds.left, event.clientY - bounds.top)
+  }
+}
+const setProviderDropTarget = (event: DragEvent, id: string) => {
+  if (!draggedProviderId.value) return
+  if (draggedProviderId.value === id) {
+    providerDropTarget.value = null
+    return
+  }
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const position = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after'
+  providerDropTarget.value = { id, position }
+}
+const leaveProviderGrid = (event: DragEvent) => {
+  if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) {
+    providerDropTarget.value = null
+  }
+}
+const dropProvider = (event: DragEvent, id: string) => {
+  const source = draggedProviderId.value
+  if (!source) return
+  setProviderDropTarget(event, id)
+  if (providerDropTarget.value)
+    appStore.moveProviderProfile(source, id, providerDropTarget.value.position)
+  clearProviderDrag()
+}
+const moveProviderWithKeyboard = async (id: string, offset: -1 | 1) => {
+  const index = appStore.providerProfiles.findIndex((profile) => profile.id === id)
+  const target = appStore.providerProfiles[index + offset]
+  if (index < 0 || !target) return
+  const handle = document.activeElement as HTMLElement | null
+  appStore.moveProviderProfile(id, target.id, offset < 0 ? 'before' : 'after')
+  await nextTick()
+  handle?.focus()
+}
+const openProviderPicker = () => {
+  providerQuery.value = ''
+  providerScrollTop.value = 0
+  providerPage.value = 'choose'
+}
+const selectProvider = (id: string) => {
+  const preset = availableProviders.find((provider) => provider.id === id)
+  if (!preset && id !== 'custom') return
+  editingProviderId.value = null
+  config.value = applyProviderPreset(defaultLlmConfig(), preset)
+  profileName.value = preset ? defaultProfileName(config.value) : ''
+  draftModels.value = normalizeModelIds([config.value.modelName])
+  manualModelId.value = ''
+  advancedOpen.value = !preset
+  modelEditorOpen.value = !draftModels.value.length
+  showApiKey.value = false
+  providerPage.value = 'editor'
+}
+const returnToProviders = () => {
+  cancelTestConnection()
+  clearCatalog()
+  testResult.value = undefined
+  showApiKey.value = false
+  config.value = defaultLlmConfig()
+  editingProviderId.value = null
+  profileName.value = ''
+  draftModels.value = []
+  manualModelId.value = ''
+  providerPage.value = 'list'
+}
+const backToProviderPicker = () => {
+  returnToProviders()
+  providerPage.value = 'choose'
+}
+const openProviderLink = (url: string) => {
+  void window.electron.openExternal({ url }).catch((error) => {
+    console.error('Failed to open external link:', error)
+    toast.error(t('features.llm.config.providerLinkFailed'))
+  })
+}
 const customHeaderIssue = computed(() => getCustomHeaderIssue(config.value.customHeaders))
 const statusLabel = computed(() => t(`features.llm.status.${appStore.copywritingStatus}`))
 const historyTaskCount = computed(() => {
@@ -501,6 +1101,7 @@ const cancelTestConnection = () => {
   testRequestId.value += 1
   testAbortController.value?.abort()
   testAbortController.value = null
+  testingProfileId.value = null
   testLoading.value = false
 }
 
@@ -733,10 +1334,13 @@ const clearOutputText = () => {
 }
 
 const resetConfigDialog = () => {
+  clearProviderDrag()
   shouldFocusCustomPrompt = false
-  config.value = structuredClone(toRaw(appStore.llmConfig))
+  selectedProfileId.value = appStore.activeProviderId
+  providerPage.value = 'list'
   copyConfig.value = structuredClone(toRaw(appStore.copywritingConfig))
   testResult.value = undefined
+  showApiKey.value = false
   configTab.value = 'connection'
 }
 const handleCloseDialog = () => {
@@ -747,14 +1351,23 @@ watch(
   (isOpen, wasOpen) => {
     if (isOpen) {
       configDialogRevision += 1
+      if (!configResetPending) resetConfigDialog()
+      configResetPending = false
       return
     }
     if (!wasOpen) return
 
     cancelTestConnection()
+    testResult.value = undefined
+    profileTestStatus.value.clear()
+    clearCatalog()
     const revision = ++configDialogRevision
+    configResetPending = true
     nextTick(() => {
-      if (!configDialogShow.value && configDialogRevision === revision) resetConfigDialog()
+      if (!configDialogShow.value && configDialogRevision === revision) {
+        configResetPending = false
+        resetConfigDialog()
+      }
     })
   },
   { flush: 'sync' },
@@ -763,6 +1376,7 @@ onBeforeUnmount(() => {
   requestId.value += 1
   abortController.value?.abort()
   cancelTestConnection()
+  clearCatalog()
 })
 const validateConfigBeforeRequest = () => {
   const issue = getLlmConfigIssue(config.value)
@@ -783,17 +1397,30 @@ const validateConfigBeforeRequest = () => {
     'protected-name': 'protectedHeaderName',
     'duplicate-name': 'duplicateHeaderName',
   }
-  configTab.value =
-    issue === 'invalid-name' ||
-    issue === 'invalid-value' ||
-    issue === 'protected-name' ||
-    issue === 'duplicate-name'
-      ? 'advanced'
-      : 'connection'
+  if (issue === 'model-name-required') modelEditorOpen.value = true
+  else advancedOpen.value = true
   toast.warning(t(`features.llm.config.${issueKeys[issue]}`))
   return false
 }
 const handleSaveConfig = () => {
+  if (providerPage.value === 'editor') {
+    addCurrentModel()
+    if (!validateConfigBeforeRequest()) return
+    const id = editingProviderId.value ?? crypto.randomUUID()
+    const previous = appStore.providerProfiles.find((profile) => profile.id === id)
+    if (previous && !sameConfig(previous.config, config.value)) profileTestStatus.value.delete(id)
+    appStore.saveProviderProfile({
+      id,
+      name:
+        profileName.value.trim() ||
+        (id === LEGACY_PROVIDER_ID ? '' : defaultProfileName(config.value)),
+      config: normalizeLlmConfig(config.value),
+      models: draftModels.value,
+    })
+    selectedProfileId.value = id
+    returnToProviders()
+    return
+  }
   if (
     copyConfig.value.systemPromptMode === 'custom' &&
     !copyConfig.value.customSystemPrompt.trim()
@@ -801,8 +1428,6 @@ const handleSaveConfig = () => {
     toast.warning(t('features.llm.errors.customPromptRequired'))
     return
   }
-  if (!validateConfigBeforeRequest()) return
-  appStore.updateLLMConfig(normalizeLlmConfig(config.value))
   appStore.updateCopywritingConfig(copyConfig.value)
   handleCloseDialog()
 }
@@ -815,17 +1440,19 @@ const fillBuiltinPrompt = () => {
 }
 const addHeader = () => config.value.customHeaders.push({ name: '', value: '' })
 const removeHeader = (index: number) => config.value.customHeaders.splice(index, 1)
-const handleTestConnection = async () => {
-  configTab.value = 'connection'
+const handleTestConnection = async (profile?: ProviderProfile) => {
   if (testAbortController.value) {
     cancelTestConnection()
     return
   }
-  testResult.value = undefined
-  if (!validateConfigBeforeRequest()) return
+  if (!profile) {
+    addCurrentModel()
+    testResult.value = undefined
+    if (!validateConfigBeforeRequest()) return
+  }
   const currentTestRequestId = ++testRequestId.value
   const controller = new AbortController()
-  const requestConfig = structuredClone(toRaw(normalizeLlmConfig(config.value)))
+  const requestConfig = structuredClone(toRaw(normalizeLlmConfig(profile?.config ?? config.value)))
   const testStartedAt = performance.now()
   let providerTestOutcome: 'success' | 'failed' | 'cancelled' | undefined
   let providerTestErrorCode: string | undefined
@@ -838,10 +1465,13 @@ const handleTestConnection = async () => {
   const providerTestOperationId = createAnalyticsOperationId()
   testLoading.value = true
   testAbortController.value = controller
+  testingProfileId.value = profile?.id ?? null
   try {
     const result = await generateCopywriting({
       llmConfig: requestConfig,
-      copywritingConfig: structuredClone(toRaw(copyConfig.value)),
+      copywritingConfig: structuredClone(
+        toRaw(profile ? appStore.copywritingConfig : copyConfig.value),
+      ),
       prompt: '请写一句简短、自然的口播开场白。',
       abortSignal: controller.signal,
       onRequestStart: () => {
@@ -863,13 +1493,15 @@ const handleTestConnection = async () => {
     if (result.unclosedThinkingOutput)
       throw new Error(t('features.llm.errors.unclosedThinkingOutput') as string)
     if (result.status !== 'completed') throw new Error(result.status)
-    testResult.value = 'success'
+    if (profile) profileTestStatus.value.set(profile.id, { status: 'success' })
+    else testResult.value = 'success'
     providerTestOutcome = 'success'
   } catch (error) {
     if (currentTestRequestId === testRequestId.value && controller.signal.aborted) {
       providerTestOutcome = 'cancelled'
     } else if (currentTestRequestId === testRequestId.value) {
-      testResult.value = 'error'
+      if (profile) profileTestStatus.value.set(profile.id, { status: 'error' })
+      else testResult.value = 'error'
       providerTestOutcome = 'failed'
       providerTestErrorCode = getErrorCode(error)
       showError(t('features.llm.errors.connectionFailed') as string, error, requestConfig)
@@ -901,6 +1533,7 @@ const handleTestConnection = async () => {
       }
       testLoading.value = false
       testAbortController.value = null
+      testingProfileId.value = null
     }
   }
 }
@@ -918,9 +1551,151 @@ defineExpose({
 .copywriting-output :deep(.v-counter) {
   flex-shrink: 0;
 }
+.llm-config-card {
+  --llm-config-gutter: 16px;
+}
+.provider-profile-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.provider-model-heading {
+  justify-content: space-between;
+}
+.llm-config-card.provider-dialog-card {
+  min-height: 0;
+  overflow: hidden;
+}
+.provider-page-heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 12px var(--llm-config-gutter) 8px;
+}
+.provider-page-heading .v-card-title {
+  min-width: 0;
+  padding: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.saved-provider-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+.saved-provider-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.16);
+  border-radius: 8px;
+}
+.saved-provider-row--sortable {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.saved-provider-row--dragging {
+  opacity: 0.5;
+}
+.saved-provider-row--drop-before::before,
+.saved-provider-row--drop-after::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: rgb(var(--v-theme-primary));
+  pointer-events: none;
+}
+.saved-provider-row--drop-before::before {
+  top: -6px;
+}
+.saved-provider-row--drop-after::after {
+  bottom: -6px;
+}
+.saved-provider-drag-handle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 36px;
+  color: rgba(var(--v-theme-on-surface), 0.65);
+  cursor: grab;
+}
+.saved-provider-drag-handle:active {
+  cursor: grabbing;
+}
+.saved-provider-drag-handle:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+.saved-provider-row:hover,
+.saved-provider-row:has(.saved-provider-card[aria-pressed='true']) {
+  background: rgba(var(--v-theme-primary), 0.06);
+}
+.saved-provider-row:has(.saved-provider-card[aria-pressed='true']) {
+  border-color: rgb(var(--v-theme-primary));
+}
+.saved-provider-actions {
+  display: flex;
+  align-items: center;
+  padding-inline-end: 4px;
+}
+.saved-provider-test-status {
+  font-size: 0.75rem;
+  max-width: 6em;
+  line-height: 1.2;
+}
+.provider-footer-status {
+  min-width: 0;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.saved-provider-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  min-height: 78px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.saved-provider-card:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: 1px;
+}
+.saved-provider-name {
+  font-weight: 600;
+}
+.saved-provider-model,
+.provider-empty {
+  color: rgba(var(--v-theme-on-surface), 0.7);
+}
+.saved-provider-model,
+.saved-provider-active {
+  font-size: 0.8125rem;
+}
+.saved-provider-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.saved-provider-active {
+  color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.12);
+  border-radius: 999px;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
 .llm-config-card > .llm-config-tabs {
   flex: 0 0 auto;
-  padding-inline: 24px;
+  padding-inline: var(--llm-config-gutter);
 }
 .llm-config-card > .llm-config-body {
   flex: 0 1 auto;
@@ -930,7 +1705,7 @@ defineExpose({
 }
 .llm-config-panel {
   /* Keep the gutter inside v-window so switch shadows clear its clipping edge. */
-  padding: 4px 24px;
+  padding: 4px var(--llm-config-gutter);
 }
 .llm-config-form > :deep(.v-input) {
   flex: 0 0 auto;
@@ -952,6 +1727,9 @@ defineExpose({
   width: 100%;
 }
 @media (max-width: 480px) {
+  .llm-config-card {
+    --llm-config-gutter: 12px;
+  }
   .llm-config-grid {
     grid-template-columns: minmax(0, 1fr);
   }
